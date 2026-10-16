@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spood Stacker</title>
+<meta name="description" content="Share a burst of macro photos and get back one image with the whole subject in focus. Runs entirely on your phone.">
+<meta name="theme-color" content="#0b6e69">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one narrow column that behaves like an app screen — pick, work, result. */
+:root {
+  --bg: #eef1ec; --surface: #ffffff; --ink: #18201c; --muted: #5b675f; --line: #cfd7d0;
+  --accent: #0b6e69; --accent-ink: #ffffff; --accent-soft: #d6ebe8; --warn: #9a4a06;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111614; --surface: #19201d; --ink: #e6ece8; --muted: #9aa8a0; --line: #2c3733;
+    --accent: #4fc2b9; --accent-ink: #062523; --accent-soft: #163632; --warn: #f0a35e; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--font-body);
+  padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(40px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+main { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+header { display: flex; align-items: center; gap: 12px; }
+header img { width: 44px; height: 44px; border-radius: 12px; }
+h1 { font: 700 1.9rem/1.05 var(--font-display); letter-spacing: -0.02em; margin: 0; }
+h1 span { color: var(--accent); }
+.lede { margin: 0; color: var(--muted); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.panel h2 { font: 700 1.1rem/1.25 var(--font-display); margin: 0; }
+.steps { margin: 0; padding-left: 1.3em; display: grid; gap: 4px; }
+.note { color: var(--muted); font-size: .92rem; margin: 0; }
+.err { color: var(--warn); font-weight: 700; margin: 0; }
+
+.drop { position: relative; border: 2px dashed var(--line); border-radius: 16px; background: var(--surface);
+  padding: 26px 18px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; cursor: pointer; }
+.drop.over, .drop:focus-within { border-color: var(--accent); background: var(--accent-soft); }
+.drop strong { font: 700 1.1rem/1.3 var(--font-display); }
+.drop small { color: var(--muted); }
+#file { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+
+.thumbs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.thumbs img { height: 64px; width: auto; border-radius: 6px; flex: none; border: 1px solid var(--line); }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+button, .btn { font: 700 1rem/1 var(--font-body); border-radius: 12px; padding: 14px 20px; cursor: pointer; border: 1px solid transparent; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
+button:focus-visible, .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.primary { background: var(--accent); color: var(--accent-ink); }
+.primary:disabled { opacity: .45; cursor: not-allowed; }
+.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+.big { font-size: 1.08rem; padding: 16px 26px; }
+label.opt { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: .95rem; }
+label.opt input { width: 18px; height: 18px; accent-color: var(--accent); }
+.count { font-family: var(--font-mono); font-size: .9rem; color: var(--muted); }
+
+/* working */
+.working { align-items: center; text-align: center; padding-block: 28px; }
+.eyes { display: flex; gap: 14px; }
+.eyes i { width: 46px; height: 46px; border-radius: 50%; background: var(--ink); position: relative; animation: look 2.4s ease-in-out infinite; }
+.eyes i::after { content: ""; position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--bg); top: 9px; left: 10px; }
+@keyframes look { 0%, 100% { transform: translateX(-4px); } 50% { transform: translateX(4px); } }
+.stage { font: 700 1.15rem/1.3 var(--font-display); }
+.bar { width: 100%; height: 12px; background: var(--accent-soft); border-radius: 99px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 99px; transition: width .4s ease; }
+.pct { font-family: var(--font-mono); color: var(--accent); font-variant-numeric: tabular-nums; }
+details { width: 100%; text-align: left; }
+details summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+pre.log { font: 12px/1.5 var(--font-mono); color: var(--muted); white-space: pre-wrap; margin: 8px 0 0; max-height: 200px; overflow: auto; }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+figure img { width: 100%; height: auto; border-radius: 12px; display: block; background: var(--line); }
+figcaption { color: var(--muted); font-size: .9rem; }
+ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem; }
+.tag { align-self: flex-start; font: 500 .72rem/1 var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 5px 9px; }
+.engine { font: 12px/1.4 var(--font-mono); color: var(--muted); margin: 0; }
+@media (prefers-reduced-motion: reduce) { .eyes i { animation: none; } .bar > i { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icons/icon-192.png" alt="" width="44" height="44">
+    <div>
+      <h1>Spood <span>Stacker</span></h1>
+      <p class="lede">A burst of lean-in photos in, one sharp spider out.</p>
+    </div>
+  </header>
+
+  <section id="install" class="panel" hidden>
+    <h2>Put it in your share menu</h2>
+    <ol class="steps">
+      <li>Tap <strong>Install app</strong> below, or Chrome's <strong>⋮</strong> menu → <strong>Add to home screen</strong> → <strong>Install</strong>.</li>
+      <li>In Gallery, select a burst, tap <strong>Share</strong>, choose <strong>Spood Stacker</strong>.</li>
+    </ol>
+    <div class="row"><button class="primary" id="installBtn" hidden>Install app</button></div>
+  </section>
+
+  <section id="pick">
+    <div class="drop" id="drop">
+      <strong>Tap to choose photos</strong>
+      <small>or share them here from Gallery · 2–30 photos of the same subject</small>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="Choose photos">
+    </div>
+  </section>
+
+  <section id="chosen" class="panel" hidden>
+    <div class="thumbs" id="thumbs"></div>
+    <div class="row">
+      <button class="primary big" id="go" disabled>Stack photos</button>
+      <button class="ghost" id="clear">Clear</button>
+      <span class="count" id="count"></span>
+    </div>
+    <label class="opt"><input type="checkbox" id="hi"> High detail (slower, needs more memory)</label>
+  </section>
+
+  <section id="work" class="panel working" hidden aria-live="polite">
+    <div class="eyes" aria-hidden="true"><i></i><i></i></div>
+    <div class="stage" id="stage">Starting</div>
+    <div class="bar" role="progressbar" aria-labelledby="stage" aria-valuemin="0" aria-valuemax="100" id="bar"><i id="fill"></i></div>
+    <div class="pct" id="pct">0%</div>
+    <p class="note" id="eta">Keep this screen open. Nothing leaves your phone.</p>
+    <details><summary>Details</summary><pre class="log" id="log"></pre></details>
+  </section>
+
+  <section id="done" class="panel" hidden>
+    <figure>
+      <a id="openFull" target="_blank" rel="noopener"><img id="result" alt="Your stacked image"></a>
+      <figcaption id="resultInfo"></figcaption>
+    </figure>
+    <p class="note" id="savedNote"></p>
+    <div id="selection" hidden><ul class="left" id="leftList"></ul></div>
+    <div class="row">
+      <button class="primary big" id="save">Save again</button>
+      <button class="ghost" id="share" hidden>Share…</button>
+      <button class="ghost" id="again">Stack more</button>
+    </div>
+  </section>
+
+  <p class="engine" id="engine">Stacking engine: loading…</p>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const S = { pick: $('pick'), chosen: $('chosen'), work: $('work'), done: $('done') };
+  let files = [], busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+
+  // ---------- install / service worker ----------
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  let installEvt = null;
+  if (!standalone) $('install').hidden = false;
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('installBtn').hidden = false; });
+  $('installBtn').addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice; installEvt = null; $('installBtn').hidden = true; });
+  addEventListener('appinstalled', () => { $('install').hidden = true; });
+
+  // ---------- engine (Web Worker) ----------
+  function engineStatus(t) { $('engine').textContent = 'Stacking engine: ' + t; refreshGo(); }
+  function startWorker() {
+    worker = new Worker('worker.js'); ready = false;
+    worker.onmessage = e => {
+      const d = e.data;
+      if (d.type === 'ready') { ready = true; engineStatus('ready. Everything runs on this phone.'); maybeAutoStart(); }
+      else if (d.type === 'progress') setProgress(d.p, d.s);
+      else if (d.type === 'log') log(d.m);
+      else if (d.type === 'selection') showSelection(d.sel);
+      else if (d.type === 'done') finish(d.out);
+      else if (d.type === 'error') fail(d.message);
+    };
+    worker.onerror = e => { e.preventDefault(); if (!ready) engineStatus('could not start. Reload the app.'); else fail(e.message || 'The stacking engine stopped.'); };
+  }
+  startWorker();
+
+  // ---------- photos shared from Gallery ----------
+  let autoStart = false;
+  async function loadShared() {
+    const n = new URLSearchParams(location.search).get('shared');
+    if (n === null) return;
+    history.replaceState(null, '', location.pathname);
+    try {
+      const cache = await caches.open('spood-shared');
+      const keys = (await cache.keys()).sort((a, b) => a.url.localeCompare(b.url));
+      const got = [];
+      for (const k of keys) {
+        const r = await cache.match(k); const b = await r.blob();
+        got.push(new File([b], decodeURIComponent(r.headers.get('x-name') || 'photo.jpg'),
+          { type: b.type || 'image/jpeg', lastModified: +r.headers.get('x-modified') || Date.now() }));
+        await cache.delete(k);
+      }
+      if (got.length) { addFiles(got); autoStart = got.length >= 2; maybeAutoStart(); }
+    } catch (e) { showPickError('Could not read the shared photos. Try sharing them again.'); }
+  }
+  function maybeAutoStart() { if (autoStart && ready && !busy && files.length >= 2) { autoStart = false; run(); } }
+  loadShared();
+
+  // ---------- choosing photos ----------
+  const drop = $('drop'), input = $('file');
+  ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+  input.addEventListener('change', () => { addFiles(input.files); input.value = ''; });
+
+  function addFiles(list) {
+    if (busy) return;
+    const imgs = [...list].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name));
+    if (!imgs.length) { showPickError('Those files are not photos. Choose JPEG or PNG images.'); return; }
+    files = files.concat(imgs).slice(0, 30);
+    files.sort((a, b) => (a.lastModified - b.lastModified) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    renderChosen();
+  }
+  function renderChosen() {
+    const t = $('thumbs'); t.querySelectorAll('img').forEach(i => URL.revokeObjectURL(i.src)); t.textContent = '';
+    files.forEach(f => { const i = new Image(); i.src = URL.createObjectURL(f); i.alt = f.name; i.loading = 'lazy'; t.appendChild(i); });
+    $('count').textContent = files.length === 1 ? '1 photo — add at least one more' : `${files.length} photos`;
+    S.chosen.hidden = files.length === 0; refreshGo();
+  }
+  function refreshGo() { $('go').disabled = busy || files.length < 2 || !ready; }
+  function showPickError(m) {
+    let p = $('pickErr'); if (!p) { p = document.createElement('p'); p.id = 'pickErr'; p.className = 'err'; S.pick.appendChild(p); }
+    p.textContent = m; setTimeout(() => { p.textContent = ''; }, 7000);
+  }
+  $('clear').addEventListener('click', () => { files = []; renderChosen(); });
+  $('go').addEventListener('click', run);
+
+  // ---------- running ----------
+  function setProgress(p, s) {
+    const pct = Math.round(p * 100);
+    $('fill').style.width = pct + '%'; $('pct').textContent = pct + '%'; $('bar').setAttribute('aria-valuenow', pct);
+    if (s) $('stage').textContent = s;
+    if (p > 0.15 && p < 1) {
+      const el = (performance.now() - t0) / 1000, left = Math.max(0, el / p - el);
+      $('eta').textContent = `About ${left < 60 ? Math.max(5, Math.ceil(left / 5) * 5) + ' seconds' : Math.ceil(left / 60) + ' min'} left. Keep this screen open.`;
+    }
+  }
+  function log(m) { $('log').textContent += m + '\n'; }
+
+  async function decode(file, maxSide) {
+    let bmp;
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+    catch (e) { throw new Error(`Could not open ${file.name}. If it is a HEIC photo, set the camera to save JPEG.`); }
+    const s = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
+    const c = new OffscreenCanvas(w, h), g = c.getContext('2d', { willReadFrequently: true });
+    g.imageSmoothingQuality = 'high'; g.drawImage(bmp, 0, 0, w, h);
+    const srcPixels = bmp.width * bmp.height; bmp.close?.();
+    const d = g.getImageData(0, 0, w, h);
+    return { data: d.data, width: w, height: h, srcPixels };
+  }
+
+  async function run() {
+    if (busy || files.length < 2 || !ready) return;
+    busy = true; refreshGo(); result = null;
+    S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
+    $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
+    t0 = performance.now(); setProgress(0, 'Reading photos');
+    try { wake = await navigator.wakeLock?.request('screen'); } catch (e) { wake = null; }
+    const lowMem = (navigator.deviceMemory || 8) <= 4;
+    const maxSide = $('hi').checked ? 4000 : (lowMem ? 2400 : 3000);
+    try {
+      const frames = [];
+      for (let i = 0; i < files.length; i++) {
+        frames.push(await decode(files[i], maxSide));
+        setProgress(0.08 * (i + 1) / files.length, `Reading photos (${i + 1} of ${files.length})`);
+      }
+      worker.postMessage({ frames, opts: { maxSide } }, frames.map(f => f.data.buffer));
+    } catch (e) { fail(e.message || String(e)); }
+  }
+
+  function showSelection(sel) {
+    const ul = $('leftList'); ul.textContent = '';
+    if (!sel.left.length) { $('selection').hidden = true; return; }
+    for (const l of sel.left) { const li = document.createElement('li'); li.textContent = `${files[l.photo - 1] ? files[l.photo - 1].name : 'Photo ' + l.photo} left out: ${l.why}.`; ul.appendChild(li); }
+    $('selection').hidden = false;
+    $('selection').dataset.used = sel.used.length;
+  }
+
+  function stamp() { const d = new Date(), p = x => String(x).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
+
+  function finish(out) {
+    const c = document.createElement('canvas'); c.width = out.width; c.height = out.height;
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height), 0, 0);
+    c.toBlob(b => {
+      const name = `spood-stack-${stamp()}.jpg`;
+      result = { blob: b, name, url: URL.createObjectURL(b) };
+      $('result').src = result.url; $('openFull').href = result.url;
+      const secs = Math.round((performance.now() - t0) / 1000);
+      const used = $('selection').dataset.used || files.length;
+      $('resultInfo').textContent = `${used} of ${files.length} photos stacked in ${secs} s · ${out.width} × ${out.height} px`;
+      setProgress(1, 'Done');
+      S.work.hidden = true; S.done.hidden = false;
+      $('share').hidden = !(navigator.canShare && navigator.canShare({ files: [new File([b], name, { type: 'image/jpeg' })] }));
+      save();
+      done();
+      scrollTo({ top: 0, behavior: 'smooth' });
+    }, 'image/jpeg', 0.95);
+  }
+  function save() {
+    if (!result) return;
+    const a = document.createElement('a'); a.href = result.url; a.download = result.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    $('savedNote').textContent = `Saved to Downloads as ${result.name}. Tap the picture to open it full size.`;
+  }
+  function fail(m) {
+    const oom = /memory|alloc|abort|OOM/i.test(m);
+    $('stage').textContent = 'Stacking stopped'; $('pct').textContent = '';
+    $('eta').textContent = '';
+    const p = document.createElement('span'); p.className = 'err';
+    p.textContent = oom ? 'The phone ran out of memory. Untick High detail, or share fewer photos, and try again.' : m;
+    $('eta').appendChild(p);
+    const back = document.createElement('button'); back.className = 'ghost'; back.textContent = 'Back';
+    back.onclick = () => { S.work.hidden = true; S.pick.hidden = false; renderChosen(); };
+    $('eta').appendChild(document.createElement('br')); $('eta').appendChild(back);
+    done();
+    if (worker) { worker.terminate(); engineStatus('restarting…'); startWorker(); }
+  }
+  function done() { busy = false; refreshGo(); try { wake?.release(); } catch (e) {} wake = null; }
+
+  $('save').addEventListener('click', save);
+  $('share').addEventListener('click', async () => {
+    try { await navigator.share({ files: [new File([result.blob], result.name, { type: 'image/jpeg' })], title: 'Spood stack' }); } catch (e) { /* cancelled */ }
+  });
+  $('again').addEventListener('click', () => { files = []; renderChosen(); S.done.hidden = true; S.pick.hidden = false; $('selection').hidden = true; delete $('selection').dataset.used; });
+  addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });
+})();
+</script>
+</body>
+</html>
