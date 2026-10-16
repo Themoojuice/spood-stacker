@@ -1,7 +1,7 @@
 /* Spood Stacker service worker
    - receives photos shared from the Android share sheet (share_target POST)
    - keeps the app (including the 10 MB stacking engine) cached for offline use */
-const VERSION = 'v1';
+const VERSION = 'v2';
 const APP_CACHE = 'spood-app-' + VERSION;
 const SHARED_CACHE = 'spood-shared';
 const SHELL = [

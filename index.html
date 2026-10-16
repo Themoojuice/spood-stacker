@@ -122,7 +122,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       <button class="ghost" id="clear">Clear</button>
       <span class="count" id="count"></span>
     </div>
-    <label class="opt"><input type="checkbox" id="hi"> High detail (slower, needs more memory)</label>
+    <label class="opt"><input type="checkbox" id="hi"> High detail (slower; drops back to normal by itself if the phone runs out of memory)</label>
   </section>
 
   <section id="work" class="panel working" hidden aria-live="polite">
@@ -259,15 +259,17 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
     return { data: d.data, width: w, height: h, srcPixels };
   }
 
+  let lastSide = 0, retrySide = 0;
   async function run() {
     if (busy || files.length < 2 || !ready) return;
     busy = true; refreshGo(); result = null;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
-    $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
+    if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
     t0 = performance.now(); setProgress(0, 'Reading photos');
     try { wake = await navigator.wakeLock?.request('screen'); } catch (e) { wake = null; }
     const lowMem = (navigator.deviceMemory || 8) <= 4;
-    const maxSide = $('hi').checked ? 4000 : (lowMem ? 2400 : 3000);
+    const maxSide = retrySide || ($('hi').checked ? 4000 : (lowMem ? 2400 : 3000));
+    lastSide = maxSide; retrySide = 0;
     try {
       const frames = [];
       for (let i = 0; i < files.length; i++) {
@@ -314,6 +316,16 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   }
   function fail(m) {
     const oom = /memory|alloc|abort|OOM/i.test(m);
+    if (oom && lastSide > 2000) {
+      // try again by itself at a smaller working size
+      retrySide = lastSide > 3000 ? 3000 : (lastSide > 2400 ? 2400 : 2000);
+      log(`Ran out of memory at ${lastSide}px; retrying at ${retrySide}px`);
+      $('stage').textContent = 'Needed more memory. Retrying at a smaller size…';
+      busy = false;
+      if (worker) worker.terminate();
+      engineStatus('restarting…'); autoStart = true; startWorker();
+      return;
+    }
     $('stage').textContent = 'Stacking stopped'; $('pct').textContent = '';
     $('eta').textContent = '';
     const p = document.createElement('span'); p.className = 'err';
