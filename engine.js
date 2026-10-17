@@ -1,6 +1,10 @@
 /* Salticid stacker engine — browser/Node port of stacker.py (OpenCV.js).
-   stackFrames(cv, frames, opts) -> {rgb: Uint8ClampedArray (RGBA), width, height, log}
-   frames: [{data: Uint8ClampedArray RGBA, width, height}]                         */
+   stackFrames(cv, frames, opts) -> {data: Uint8ClampedArray (RGBA), width, height, log, ref}
+   frames: [{data: Uint8ClampedArray RGBA, width, height}]
+   opts: maxSide, onProgress(p, stage), onLog(msg), onSelection({used, left}),
+         onFrame(frame) - optional; receives each lined-up photo cropped and finished
+         like the stack ({photo, used, why, ref, width, height, data, focus}) for retouching.
+   ref: 1-based number of the reference photo (the stack has its geometry and EXIF).  */
 (function (root) {
   'use strict';
 
@@ -130,17 +134,20 @@
     const thumbs = wg.map(g => { const s = new cv.Mat(); cv.resize(g, s, new cv.Size(0, 0), 0.25, 0.25, cv.INTER_AREA); return s; });
     const sharpT = thumbs.map(t => { const f = focusMeasure(cv, t, 2); const v = cv.mean(f)[0]; f.delete(); return v; });
     const allOn = new cv.Mat(thumbs[0].rows, thumbs[0].cols, cv.CV_8U, new cv.Scalar(1));
+    const focusT = thumbs.map(t => focusMeasure(cv, t, 2));
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
       if (!keep[i] || !keep[j]) continue;
       const c = bandNCC(cv, thumbs[i], thumbs[j], allOn);
-      if (c > 0.985) {
+      // same picture AND same focus: with a steady camera, neighbouring focus slices
+      // look alike at this size, but they are sharp in different places
+      if (c > 0.985 && sameFocus(focusT[i].data32F, focusT[j].data32F)) {
         const better = (srcPx[i] > srcPx[j] * 1.1) ? i : (srcPx[j] > srcPx[i] * 1.1) ? j : (sharpT[i] >= sharpT[j] ? i : j);
         const worse = better === i ? j : i;
         if (worse === ref) continue;                     // never drop the reference
         keep[worse] = false; why[worse] = `near-duplicate of photo ${better + 1}`;
       }
     }
-    allOn.delete(); thumbs.forEach(t => t.delete());
+    allOn.delete(); thumbs.forEach(t => t.delete()); focusT.forEach(t => t.delete());
     // (c) photos that disagree with the reference almost everywhere (subject moved a lot)
     const ghostsAll = ghostWeights(cv, wg, ref);
     for (let i = 0; i < n; i++) {
@@ -163,6 +170,21 @@
     const common = wmask[idx[0]].clone();
     for (const i of idx.slice(1)) cv.bitwise_and(common, wmask[i], common);
     wmask.forEach(m => m.delete());
+    const box = largestRect(cv, common); common.delete();
+
+    // ---------- 5b. hand the lined-up photos to the retouch brush ----------
+    // Each is cropped and finished exactly like the stack, so painted pixels match.
+    // Photos that could not be lined up are not offered.
+    if (opts.onFrame) {
+      const offer = [...Array(n).keys()].filter(i => keep[i] || !/lined up/.test(why[i]));
+      for (let k = 0; k < offer.length; k++) {
+        const i = offer[k];
+        await opts.onFrame(exportFrame(cv, warped[i], wg[i], ghostsAll[i], box, {
+          photo: i + 1, used: keep[i], why: why[i], ref: i === ref
+        }));
+        progress(0.65 + 0.03 * (k + 1) / offer.length, 'Keeping photos for retouching');
+      }
+    }
     for (const i of left) { warped[i].delete(); wg[i].delete(); ghostsAll[i].delete(); }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), ghosts = idx.map(i => ghostsAll[i]);
     progress(0.67, 'Merging');
@@ -176,11 +198,10 @@
     // ---------- 7. finish ----------
     const b = new cv.Mat(); cv.GaussianBlur(fused, b, sz(0, 0), 1.2, 1.2);
     const sharp = new cv.Mat(); cv.addWeighted(fused, 1.35, b, -0.35, 0, sharp); b.delete(); fused.delete();
-    const box = largestRect(cv, common); common.delete();
     const crop = sharp.roi(new cv.Rect(box.x, box.y, box.w, box.h));
     const u8 = new cv.Mat(); crop.convertTo(u8, cv.CV_8U, 255, 0.5); crop.delete(); sharp.delete();
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
-    const out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log };
+    const out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
     rgba.delete();
     trash.forEach(m => free(m));
     progress(1, 'Done');
@@ -189,6 +210,34 @@
   }
 
   // ---------- helpers ----------
+  /** One lined-up photo, cropped and sharpened like the stack, plus a small
+      map of where it is sharp (and agrees with the reference) for "sharpest here". */
+  function exportFrame(cv, img8, gray, ghostHalf, box, info) {
+    const W = img8.cols, H = img8.rows, m = 8;
+    const x0 = Math.max(0, box.x - m), y0 = Math.max(0, box.y - m);
+    const x1 = Math.min(W, box.x + box.w + m), y1 = Math.min(H, box.y + box.h + m);
+    const big = img8.roi(new cv.Rect(x0, y0, x1 - x0, y1 - y0));
+    const bl = new cv.Mat(); cv.GaussianBlur(big, bl, new cv.Size(0, 0), 1.2, 1.2);
+    const sh = new cv.Mat(); cv.addWeighted(big, 1.35, bl, -0.35, 0, sh); bl.delete(); big.delete();
+    const c = sh.roi(new cv.Rect(box.x - x0, box.y - y0, box.w, box.h));
+    const rgba = new cv.Mat(); cv.cvtColor(c, rgba, cv.COLOR_RGB2RGBA); c.delete(); sh.delete();
+    // sharpness map at 1/8 size, weighted down where the spider moved
+    const g = gray.roi(new cv.Rect(box.x, box.y, box.w, box.h));
+    const f = focusMeasure(cv, g, 4); g.delete();
+    const fw = Math.ceil(box.w / 8), fh = Math.ceil(box.h / 8);
+    const fs = new cv.Mat(); cv.resize(f, fs, new cv.Size(fw, fh), 0, 0, cv.INTER_AREA); f.delete();
+    const gh = ghostHalf.roi(new cv.Rect(Math.floor(box.x / 2), Math.floor(box.y / 2),
+      Math.min(ghostHalf.cols - Math.floor(box.x / 2), Math.ceil(box.w / 2)), Math.min(ghostHalf.rows - Math.floor(box.y / 2), Math.ceil(box.h / 2))));
+    const gs = new cv.Mat(); cv.resize(gh, gs, new cv.Size(fw, fh), 0, 0, cv.INTER_AREA); gh.delete();
+    cv.multiply(fs, gs, fs); gs.delete();
+    const res = Object.assign({}, info, {
+      width: rgba.cols, height: rgba.rows, data: new Uint8ClampedArray(rgba.data),
+      focus: { width: fw, height: fh, data: new Float32Array(fs.data32F) }
+    });
+    rgba.delete(); fs.delete();
+    return res;
+  }
+
   function eye3() { return [1, 0, 0, 0, 1, 0, 0, 0, 1]; }
   function mul3(a, b) {
     const r = new Array(9);
@@ -457,6 +506,19 @@
     if (n < 10) return 0;
     const cov = sab / n - (sa / n) * (sb / n), va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
     return cov / Math.sqrt(va * vb + 1e-12);
+  }
+
+  function sameFocus(A, B) {
+    // Two photos are sharp in the same places if their sharpness ratio is the same
+    // everywhere (a uniform ratio is allowed: a lower-resolution copy is softer overall).
+    let ma = 0, mb = 0;
+    for (let k = 0; k < A.length; k++) { if (A[k] > ma) ma = A[k]; if (B[k] > mb) mb = B[k]; }
+    const ta = 0.02 * ma, tb = 0.02 * mb, r = [];
+    for (let k = 0; k < A.length; k += 2) if (A[k] > ta || B[k] > tb) r.push(Math.log((A[k] + 1e-6 * ma) / (B[k] + 1e-6 * mb)));
+    if (r.length < 50) return true;
+    const med = Float64Array.from(r).sort()[r.length >> 1], lim = Math.log(1.6);
+    let off = 0; for (const v of r) if (Math.abs(v - med) > lim) off++;
+    return off / r.length < 0.05;
   }
 
   function winnerShare(cv, grays, ghosts) {

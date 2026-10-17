@@ -1,0 +1,8 @@
+# test bursts stay on your machine (real photos carry GPS); regenerate the synthetic ones with tests/make_synthetic.py
+tests/bursts/
+tests/.cache/
+compare-out/
+app-check-out/
+retouch-effect-out/
+tools/node_modules/
+__pycache__/

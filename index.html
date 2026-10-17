@@ -86,6 +86,37 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
 .tag { align-self: flex-start; font: 500 .72rem/1 var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 5px 9px; }
 .engine { font: 12px/1.4 var(--font-mono); color: var(--muted); margin: 0; }
 @media (prefers-reduced-motion: reduce) { .eyes i { animation: none; } .bar > i { transition: none; } }
+.meta { margin: 0; font-size: .9rem; color: var(--muted); }
+.meta.warn { color: var(--warn); }
+
+/* retouch: a full-screen editor over the app */
+body.rt-open { overflow: hidden; }
+.retouch { position: fixed; inset: 0; z-index: 10; background: #0d1110; color: #e6ece8; display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.rt-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; }
+.rt-top h2 { font: 700 1.05rem/1 var(--font-display); margin: 0; }
+.rt-stage { position: relative; flex: 1; min-height: 0; }
+.rt-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+.rt-toast { position: absolute; left: 12px; right: 12px; bottom: 10px; margin: 0 auto; max-width: 520px; background: rgba(13,17,16,.88);
+  border: 1px solid #2c3733; border-radius: 12px; padding: 9px 12px; font-size: .9rem; pointer-events: none; }
+.rt-tools { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; border-top: 1px solid #2c3733; background: #121816; }
+.rt-src { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.rt-chip { flex: none; min-width: 44px; min-height: 40px; padding: 8px 12px; border-radius: 10px; border: 1px solid #2c3733; background: #19201d;
+  color: #e6ece8; font: 700 .95rem/1 var(--font-mono); cursor: pointer; }
+.rt-chip.stack { font-family: var(--font-body); }
+.rt-chip.unused { border-style: dashed; color: #9aa8a0; }
+.rt-chip[aria-checked="true"] { background: #4fc2b9; color: #062523; border-color: #4fc2b9; }
+.rt-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.seg { display: inline-flex; border: 1px solid #2c3733; border-radius: 12px; overflow: hidden; }
+.seg button { border-radius: 0; padding: 11px 14px; background: transparent; color: #e6ece8; border: 0; }
+.seg button[aria-pressed="true"] { background: #4fc2b9; color: #062523; }
+.retouch .ghost { color: #e6ece8; border-color: #2c3733; padding: 11px 14px; }
+.retouch .primary { background: #4fc2b9; color: #062523; padding: 11px 16px; }
+.retouch button:disabled { opacity: .4; cursor: not-allowed; }
+.retouch [data-rt=peek] { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.rt-sliders { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 8px 10px; align-items: center; font-size: .9rem; color: #9aa8a0; }
+.rt-sliders input { width: 100%; accent-color: #4fc2b9; }
+@media (max-width: 420px) { .rt-sliders { grid-template-columns: auto 1fr; } }
 </style>
 </head>
 <body>
@@ -140,9 +171,11 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       <figcaption id="resultInfo"></figcaption>
     </figure>
     <p class="note" id="savedNote"></p>
+    <p class="meta" id="metaNote" hidden></p>
     <div id="selection" hidden><ul class="left" id="leftList"></ul></div>
     <div class="row">
-      <button class="primary big" id="save">Save again</button>
+      <button class="primary big" id="retouchBtn" hidden>Retouch</button>
+      <button class="ghost" id="save">Save again</button>
       <button class="ghost" id="share" hidden>Share…</button>
       <button class="ghost" id="again">Stack more</button>
     </div>
@@ -151,11 +184,43 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   <p class="engine" id="engine">Stacking engine: loading…</p>
 </main>
 
+<section id="retouch" class="retouch" hidden aria-label="Retouch">
+  <div class="rt-top">
+    <button class="ghost" data-rt="cancel" type="button">Cancel</button>
+    <h2>Retouch</h2>
+    <button class="primary" data-rt="done" type="button">Done</button>
+  </div>
+  <div class="rt-stage" data-rt="stage">
+    <canvas data-rt="view" aria-label="The stacked photo. Tap to pick a source photo, then paint."></canvas>
+    <p class="rt-toast" data-rt="toast" role="status" hidden></p>
+  </div>
+  <div class="rt-tools">
+    <div class="rt-src" data-rt="src" role="radiogroup" aria-label="Paint from"></div>
+    <div class="rt-row">
+      <div class="seg" role="group" aria-label="Tool">
+        <button type="button" data-mode="pick" aria-pressed="true">Pick</button>
+        <button type="button" data-mode="paint" aria-pressed="false">Paint</button>
+        <button type="button" data-mode="move" aria-pressed="false">Move</button>
+      </div>
+      <button class="ghost" type="button" data-rt="undo">Undo</button>
+      <button class="ghost" type="button" data-rt="peek">Hold to peek</button>
+    </div>
+    <div class="rt-sliders">
+      <label for="rtSize">Brush</label><input id="rtSize" data-rt="size" type="range" min="8" max="160" value="44">
+      <label for="rtSoft">Soft edge</label><input id="rtSoft" data-rt="soft" type="range" min="0" max="100" value="55">
+    </div>
+  </div>
+</section>
+
+<script src="exif.js"></script>
+<script src="retouch.js"></script>
+
 <script>
 (() => {
   const $ = id => document.getElementById(id);
   const S = { pick: $('pick'), chosen: $('chosen'), work: $('work'), done: $('done') };
   let files = [], busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
+  let rtFrames = [], stackPixels = null, autoPixels = null, refPhoto = 0;
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 
   // ---------- install / service worker ----------
@@ -176,6 +241,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       else if (d.type === 'progress') setProgress(d.p, d.s);
       else if (d.type === 'log') log(d.m);
       else if (d.type === 'selection') showSelection(d.sel);
+      else if (d.type === 'frame') rtFrames.push(d.frame);
       else if (d.type === 'done') finish(d.out);
       else if (d.type === 'error') fail(d.message);
     };
@@ -262,7 +328,8 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   let lastSide = 0, retrySide = 0;
   async function run() {
     if (busy || files.length < 2 || !ready) return;
-    busy = true; refreshGo(); result = null;
+    busy = true; refreshGo(); result = null; rtFrames = []; stackPixels = autoPixels = null; refPhoto = 0;
+    $('retouchBtn').hidden = true; $('metaNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
     t0 = performance.now(); setProgress(0, 'Reading photos');
@@ -276,7 +343,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
         frames.push(await decode(files[i], maxSide));
         setProgress(0.08 * (i + 1) / files.length, `Reading photos (${i + 1} of ${files.length})`);
       }
-      worker.postMessage({ frames, opts: { maxSide } }, frames.map(f => f.data.buffer));
+      worker.postMessage({ frames, opts: { maxSide, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas) } }, frames.map(f => f.data.buffer));
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -290,24 +357,82 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
 
   function stamp() { const d = new Date(), p = x => String(x).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
 
-  function finish(out) {
-    const c = document.createElement('canvas'); c.width = out.width; c.height = out.height;
-    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height), 0, 0);
-    c.toBlob(b => {
-      const name = `spood-stack-${stamp()}.jpg`;
-      result = { blob: b, name, url: URL.createObjectURL(b) };
-      $('result').src = result.url; $('openFull').href = result.url;
-      const secs = Math.round((performance.now() - t0) / 1000);
-      const used = $('selection').dataset.used || files.length;
-      $('resultInfo').textContent = `${used} of ${files.length} photos stacked in ${secs} s · ${out.width} × ${out.height} px`;
-      setProgress(1, 'Done');
-      S.work.hidden = true; S.done.hidden = false;
-      $('share').hidden = !(navigator.canShare && navigator.canShare({ files: [new File([b], name, { type: 'image/jpeg' })] }));
-      save();
-      done();
-      scrollTo({ top: 0, behavior: 'smooth' });
-    }, 'image/jpeg', 0.95);
+  // ---------- metadata: the reference photo's date, GPS and camera go into the JPEG ----------
+  let metaInfo = null;
+  async function withExif(blob, w, h) {
+    const src = files[(refPhoto || 1) - 1];
+    metaInfo = { src: src && src.name, found: false };
+    if (!src || !window.SpoodExif) return blob;
+    try {
+      const tiff = SpoodExif.readExif(await src.slice(0, 1 << 20).arrayBuffer());
+      if (!tiff) return blob;
+      const patched = SpoodExif.patchExif(tiff, w, h);
+      if (!patched) return blob;
+      Object.assign(metaInfo, SpoodExif.describe(tiff), { found: true });
+      return new Blob([SpoodExif.insertExif(new Uint8Array(await blob.arrayBuffer()), patched)], { type: 'image/jpeg' });
+    } catch (e) { return blob; }
   }
+  function showMeta() {
+    const m = metaInfo, el = $('metaNote');
+    if (!m) { el.hidden = true; return; }
+    el.classList.remove('warn');
+    if (!m.found) { el.textContent = 'The photos carried no date or location (EXIF), so the stack has none either.'; el.classList.add('warn'); }
+    else if (m.gps) el.textContent = `Date, location and camera kept from ${m.src}.`;
+    else {
+      el.textContent = `Date and camera kept from ${m.src}. The photos arrived without a location: Android can remove it when sharing (check the share sheet's location option), so add the place on iNaturalist.`;
+      el.classList.add('warn');
+    }
+    el.hidden = false;
+  }
+  const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.95));
+  async function setResult(blob, name, w, h) {
+    if (result) URL.revokeObjectURL(result.url);
+    const b = await withExif(blob, w, h);
+    result = { blob: b, name, url: URL.createObjectURL(b) };
+    $('result').src = result.url; $('openFull').href = result.url;
+    $('share').hidden = !(navigator.canShare && navigator.canShare({ files: [new File([b], name, { type: 'image/jpeg' })] }));
+    showMeta();
+  }
+
+  async function finish(out) {
+    refPhoto = out.ref || 0;
+    const c = document.createElement('canvas'); c.width = out.width; c.height = out.height;
+    stackPixels = autoPixels = new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height);
+    c.getContext('2d').putImageData(stackPixels, 0, 0);
+    const b = await toJpeg(c);
+    c.width = c.height = 0;
+    await setResult(b, `spood-stack-${stamp()}.jpg`, out.width, out.height);
+    const secs = Math.round((performance.now() - t0) / 1000);
+    const used = $('selection').dataset.used || files.length;
+    $('resultInfo').textContent = `${used} of ${files.length} photos stacked in ${secs} s · ${out.width} × ${out.height} px`;
+    setProgress(1, 'Done');
+    S.work.hidden = true; S.done.hidden = false;
+    $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
+    save();
+    done();
+    scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ---------- retouch ----------
+  window.__rtFramesForTest = () => rtFrames;          // read by tests/retouch_effect.py
+  $('retouchBtn').addEventListener('click', () => {
+    if (!stackPixels || !rtFrames.length) return;
+    history.pushState({ rt: true }, '');                  // so Android's back gesture closes the editor
+    const leave = () => { if (history.state && history.state.rt) history.back(); };
+    window.spoodRetouchSession = SpoodRetouch.open({
+      root: $('retouch'), stack: stackPixels, auto: autoPixels, frames: rtFrames,
+      onCancel: leave,
+      onDone: async (canvas, changed) => {
+        leave();
+        if (!changed) return;
+        const b = await toJpeg(canvas);
+        stackPixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+        canvas.width = canvas.height = 0;
+        await setResult(b, result.name.replace(/(-retouched)?\.jpg$/, '-retouched.jpg'), stackPixels.width, stackPixels.height);
+        save();
+      }
+    });
+  });
   function save() {
     if (!result) return;
     const a = document.createElement('a'); a.href = result.url; a.download = result.name;
@@ -343,7 +468,16 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   $('share').addEventListener('click', async () => {
     try { await navigator.share({ files: [new File([result.blob], result.name, { type: 'image/jpeg' })], title: 'Spood stack' }); } catch (e) { /* cancelled */ }
   });
-  $('again').addEventListener('click', () => { files = []; renderChosen(); S.done.hidden = true; S.pick.hidden = false; $('selection').hidden = true; delete $('selection').dataset.used; });
+  addEventListener('popstate', () => {
+    const rt = $('retouch');
+    if (rt.hidden) return;
+    rt.querySelector('[data-rt=cancel]').click();          // asks first if there is painting to lose
+    if (!rt.hidden) history.pushState({ rt: true }, '');
+  });
+  $('again').addEventListener('click', () => {
+    files = []; rtFrames = []; stackPixels = autoPixels = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
+    $('selection').hidden = true; delete $('selection').dataset.used;
+  });
   addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });
 })();
 </script>

@@ -1,0 +1,11 @@
+{
+  "name": "spood-stacker-tools",
+  "private": true,
+  "description": "Compare two versions of the stacking engine on the same bursts",
+  "scripts": {
+    "compare": "node compare.js"
+  },
+  "dependencies": {
+    "sharp": ">=0.33.0"
+  }
+}
