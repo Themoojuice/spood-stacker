@@ -35,8 +35,7 @@ Every change to `engine.js` should be checked against a known-good version on th
 cd tools && npm install            # once (installs the "sharp" image library)
 cd ..
 python tests/make_synthetic.py     # once: synthetic bursts with a known right answer
-git tag gold <commit>              # once: the version everything is judged against
-node tools/compare.js              # gold vs engine.js as it is on disk now
+node tools/compare.js              # the gold version (tests/gold.txt) vs engine.js as it is now
 ```
 
 It writes a contact sheet per burst to `compare-out/<time>/` (open `index.html`): both results, a map of where they differ, and 1:1 close-ups of the regions that differ most. Results are cached per engine version, so the gold runs only once.

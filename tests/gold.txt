@@ -1,0 +1,4 @@
+2b1302f43abb469803581730a05de0a79439ed0f
+
+The engine version every change is compared against (the live app before 18 Oct 2026).
+To move the baseline, replace the first line with another commit.

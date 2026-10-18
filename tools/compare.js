@@ -3,7 +3,7 @@
 
    node tools/compare.js [options] [burst folders...]
 
-   --a SPEC     baseline   (default: git:gold if that tag exists, else git:HEAD)
+   --a SPEC     baseline   (default: the gold version, from tests/gold.txt)
    --b SPEC     candidate  (default: engine.js as it is on disk now)
                 SPEC is a file path, git:<ref> (engine.js at that commit/tag/branch),
                 or py:<path to stacker.py> (the laptop version)
@@ -42,7 +42,10 @@ for (let i = 0; i < args.length; i++) {
 
 const git = (...a) => execFileSync('git', ['-C', L.ROOT, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 const hasTag = t => { try { git('rev-parse', '--verify', '--quiet', `refs/tags/${t}`); return true; } catch (e) { return false; } };
-opt.a = opt.a || (hasTag('gold') ? 'git:gold' : 'git:HEAD');
+// the baseline: a "gold" tag if there is one, else the commit named in tests/gold.txt
+const goldFile = path.join(L.ROOT, 'tests', 'gold.txt');
+const goldRef = hasTag('gold') ? 'gold' : (fs.existsSync(goldFile) ? fs.readFileSync(goldFile, 'utf8').split(/\s/)[0] : null);
+opt.a = opt.a || (goldRef ? `git:${goldRef}` : 'git:HEAD');
 opt.b = opt.b || 'engine.js';
 
 const CACHE = path.join(L.ROOT, 'tests', '.cache');
