@@ -1,11 +1,11 @@
 /* Spood Stacker service worker
    - receives photos shared from the Android share sheet (share_target POST)
    - keeps the app (including the 10 MB stacking engine) cached for offline use */
-const VERSION = 'v2';
+const VERSION = 'v3';
 const APP_CACHE = 'spood-app-' + VERSION;
 const SHARED_CACHE = 'spood-shared';
 const SHELL = [
-  './', './index.html', './manifest.webmanifest', './engine.js', './worker.js',
+  './', './index.html', './manifest.webmanifest', './engine.js', './worker.js', './exif.js', './retouch.js',
   './vendor/opencv-4.10.0.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-192.png', './icons/maskable-512.png'
 ];

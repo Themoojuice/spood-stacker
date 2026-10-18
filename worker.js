@@ -19,7 +19,15 @@ self.onmessage = async ev => {
     const out = await self.SalticidStacker.stackFrames(cv, ev.data.frames, Object.assign({}, ev.data.opts, {
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),
-      onSelection: sel => postMessage({ type: 'selection', sel })
+      onSelection: sel => postMessage({ type: 'selection', sel }),
+      // lined-up photos for the retouch brush, sent as JPEGs to keep the page's memory down
+      onFrame: ev.data.opts.retouch && typeof OffscreenCanvas !== 'undefined' ? async f => {
+        const c = new OffscreenCanvas(f.width, f.height);
+        c.getContext('2d').putImageData(new ImageData(f.data, f.width, f.height), 0, 0);
+        const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.95 });
+        postMessage({ type: 'frame', frame: { photo: f.photo, used: f.used, why: f.why, ref: f.ref,
+          width: f.width, height: f.height, blob, focus: f.focus } }, [f.focus.data.buffer]);
+      } : null
     }));
     postMessage({ type: 'done', out }, [out.data.buffer]);
   } catch (e) {
