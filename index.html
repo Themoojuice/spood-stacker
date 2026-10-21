@@ -322,7 +322,17 @@ body.rt-open { overflow: hidden; }
     g.imageSmoothingQuality = 'high'; g.drawImage(bmp, 0, 0, w, h);
     const srcPixels = bmp.width * bmp.height; bmp.close?.();
     const d = g.getImageData(0, 0, w, h);
-    return { data: d.data, width: w, height: h, srcPixels };
+    return { data: d.data, width: w, height: h, srcPixels, taken: await takenOf(file) };
+  }
+  // capture time: EXIF first, then the camera's file name; lets the engine spot a
+  // photo from a different moment (a second burst, the subject having walked)
+  async function takenOf(file) {
+    if (!window.SpoodExif) return null;
+    try {
+      const t = SpoodExif.takenTime(SpoodExif.readExif(await file.slice(0, 1 << 20).arrayBuffer()));
+      if (t != null) return t;
+    } catch (e) { /* no EXIF */ }
+    return SpoodExif.timeFromName(file.name);
   }
 
   let lastSide = 0, retrySide = 0;

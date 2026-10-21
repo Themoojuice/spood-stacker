@@ -1,6 +1,8 @@
 /* Salticid stacker engine — browser/Node port of stacker.py (OpenCV.js).
    stackFrames(cv, frames, opts) -> {data: Uint8ClampedArray (RGBA), width, height, log, ref}
-   frames: [{data: Uint8ClampedArray RGBA, width, height}]
+   frames: [{data: Uint8ClampedArray RGBA, width, height, taken?}]
+           taken: optional capture time in ms (EXIF or file name); photos taken
+           well apart from the rest are checked harder for a moved subject.
    opts: maxSide, onProgress(p, stage), onLog(msg), onSelection({used, left}),
          onFrame(frame) - optional; receives each lined-up photo cropped and finished
          like the stack ({photo, used, why, ref, width, height, data, focus}) for retouching.
@@ -52,8 +54,11 @@
     const masks = gray.map(g => validMask(cv, g));
     const order = orderFrames(cv, gray);
     const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
+    const moment = moments(frames);
+    if (moment.split) say(`taken at ${moment.groups} different moments (more than ${MOMENT_GAP / 1000} s apart)`);
     let ref = 0, best = -1;
     for (let i = 0; i < n; i++) {
+      if (moment.apart[i]) continue;                   // the reference comes from the main burst
       const roi = gray[i].roi(new cv.Rect(cx0, cy0, cx1 - cx0, cy1 - cy0));
       const f = focusMeasure(cv, roi, 4); const v = cv.mean(f)[0]; f.delete(); roi.delete();
       if (v > best) { best = v; ref = i; }
@@ -130,6 +135,18 @@
     const keep = new Array(n).fill(true), why = new Array(n).fill('');
     // (a) photos that could not be lined up
     for (let i = 0; i < n; i++) if (i !== ref && inl[i] < 15 && !eccOk[i]) { keep[i] = false; why[i] = 'could not be lined up with the others'; }
+    // (a2) photos that matched far worse than the rest and could not be fine-tuned:
+    //      usually the subject (or something big in frame) moved, not the camera
+    const inlOthers = inl.filter((v, i) => i !== ref && keep[i]);
+    const inlBest = inlOthers.length ? Math.max(...inlOthers) : 0;
+    for (let i = 0; i < n; i++) {
+      if (i === ref || !keep[i] || eccOk[i]) continue;
+      if (inl[i] < WEAK_MATCH * inlBest) {
+        keep[i] = false;
+        why[i] = moment.apart[i] ? `taken ${gapText(moment.apart[i])} the others, and the subject had moved`
+          : `matched the others poorly (${inl[i]} matches against ${inlBest}): the subject or camera moved`;
+      }
+    }
     // (b) near-duplicates: keep the higher-resolution (then sharper) copy
     const thumbs = wg.map(g => { const s = new cv.Mat(); cv.resize(g, s, new cv.Size(0, 0), 0.25, 0.25, cv.INTER_AREA); return s; });
     const sharpT = thumbs.map(t => { const f = focusMeasure(cv, t, 2); const v = cv.mean(f)[0]; f.delete(); return v; });
@@ -153,7 +170,12 @@
     for (let i = 0; i < n; i++) {
       if (!keep[i] || i === ref) continue;
       const m = cv.mean(ghostsAll[i])[0];
+      const sm = subjectAgreement(cv, wg[ref], wg[i], ghostsAll[i]);
+      const gap = moment.apart[i];
       if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
+      else if (sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
+      else if (gap && sm < SUBJECT_MOVED_APART) { keep[i] = false; why[i] = `taken ${gapText(gap)} the others, and the subject had moved a little`; }
+      else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others but lines up well, kept`);
     }
     let idx = [...Array(n).keys()].filter(i => keep[i]);
     // (d) photos that add no sharp detail the others don't already have
@@ -209,6 +231,40 @@
     return out;
   }
 
+  // ---------- photo-selection thresholds ----------
+  const MOMENT_GAP = 2000;          // ms between consecutive photos that starts a new "moment"
+  const WEAK_MATCH = 0.25;          // fewer than this share of the best photo's matches, and no fine-tune
+  const SUBJECT_MOVED = 0.8;        // subject agreement below this: moved (real bursts 0.96+, weevil 0.38)
+  const SUBJECT_MOVED_APART = 0.95; // stricter for photos from a different moment
+
+  /** Groups photos into moments by capture time. apart[i] is the signed gap (ms)
+      from photo i to the main moment (the largest group), or 0 if it is in it
+      or has no time. Photos without a time are never treated as apart. */
+  function moments(frames) {
+    const n = frames.length, apart = new Array(n).fill(0);
+    const timed = [...Array(n).keys()].filter(i => Number.isFinite(frames[i].taken)).sort((a, b) => frames[a].taken - frames[b].taken);
+    if (timed.length < 2) return { apart, groups: 1, split: false };
+    const groups = [[timed[0]]];
+    for (let k = 1; k < timed.length; k++) {
+      if (frames[timed[k]].taken - frames[timed[k - 1]].taken > MOMENT_GAP) groups.push([]);
+      groups[groups.length - 1].push(timed[k]);
+    }
+    if (groups.length === 1) return { apart, groups: 1, split: false };
+    // main = largest group; ties go to the earlier one
+    const main = groups.reduce((a, g) => (g.length > a.length ? g : a), groups[0]);
+    const t0 = frames[main[0]].taken, t1 = frames[main[main.length - 1]].taken;
+    for (const g of groups) if (g !== main) for (const i of g) {
+      const t = frames[i].taken; apart[i] = t > t1 ? t - t1 : t - t0;
+    }
+    return { apart, groups: groups.length, split: true };
+  }
+
+  function gapText(ms) {
+    const s = Math.max(1, Math.round(Math.abs(ms) / 1000));
+    const d = s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`;
+    return `${d} ${ms > 0 ? 'after' : 'before'}`;
+  }
+
   // ---------- helpers ----------
   /** One lined-up photo, cropped and sharpened like the stack, plus a small
       map of where it is sharp (and agrees with the reference) for "sharpest here". */
@@ -236,6 +292,28 @@
     });
     rgba.delete(); fs.delete();
     return res;
+  }
+
+
+  /** How well a photo agrees with the reference where either of them is sharp
+      (the subject), 0..1. The frame-wide mean is dominated by background, so a
+      small subject that walked off barely moves it; this weights by sharpness. */
+  function subjectAgreement(cv, refG, curG, ghostHalf) {
+    const sz = new cv.Size(ghostHalf.cols, ghostHalf.rows);
+    const half = g => { const s = new cv.Mat(); cv.resize(g, s, sz, 0, 0, cv.INTER_AREA); const f = focusMeasure(cv, s, 3); s.delete(); return f; };
+    const fr = half(refG), fc = half(curG), R = fr.data32F, C = fc.data32F, G = ghostHalf.data32F;
+    const N = R.length, mx = new Float32Array(N);
+    for (let k = 0; k < N; k++) mx[k] = Math.max(R[k], C[k]);
+    fr.delete(); fc.delete();
+    const sorted = Float32Array.from(mx.filter((_, k) => k % 5 === 0)).sort();
+    const top = sorted[Math.floor(sorted.length * 0.99)] || 1e-9;
+    let sw = 0, sg = 0;
+    for (let k = 0; k < N; k++) {
+      const w = Math.min(1, mx[k] / top);
+      if (w < 0.1) continue;
+      sw += w; sg += w * G[k];
+    }
+    return sw > 0 ? sg / sw : 1;
   }
 
   function eye3() { return [1, 0, 0, 0, 1, 0, 0, 0, 1]; }

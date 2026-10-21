@@ -117,6 +117,41 @@
     return info;
   }
 
+  /** Capture time in ms (local clock read as UTC: only differences matter), from
+      DateTimeOriginal plus SubSecTimeOriginal, or null. */
+  function takenTime(tiff) {
+    if (!tiff) return null;
+    const entries = [];
+    const w = walk(tiff, (tag, e, type, count, name) => entries.push({ tag, e, type, count, name }));
+    if (!w) return null;
+    const ascii = (e, count) => {
+      const off = count <= 4 ? e + 8 : w.u32(e + 8);
+      let s = ''; for (let i = 0; i < count && off + i < tiff.length; i++) { const c = tiff[off + i]; if (!c) break; s += String.fromCharCode(c); }
+      return s.trim();
+    };
+    let date = null, sub = '';
+    for (const x of entries) {
+      if (x.type !== 2) continue;
+      if (x.name === 'exif' && x.tag === 0x9003) date = ascii(x.e, x.count);
+      if (x.name === 'ifd0' && x.tag === 0x0132 && !date) date = ascii(x.e, x.count);
+      if (x.name === 'exif' && x.tag === 0x9291) sub = ascii(x.e, x.count);
+    }
+    const m = date && date.match(/^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/);
+    if (!m) return null;
+    const t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    const f = /^\d+$/.test(sub) ? +('0.' + sub) * 1000 : 0;
+    return Number.isFinite(t) ? t + f : null;
+  }
+
+  /** Capture time from a camera file name such as IMG_20260828_155557_3.jpg,
+      PXL_20260828_055557123.jpg or 20260828_155557.jpg (ms, as above), or null. */
+  function timeFromName(name) {
+    const m = String(name || '').match(/(?:^|[^\d])(20\d\d)(\d\d)(\d\d)[_-](\d\d)(\d\d)(\d\d)(\d{3})?(?!\d)/);
+    if (!m) return null;
+    const t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], m[7] ? +m[7] : 0);
+    return Number.isFinite(t) ? t : null;
+  }
+
   /** JPEG bytes with the given TIFF block inserted as EXIF (replacing any
       APP0/APP1 the encoder wrote). */
   function insertExif(jpeg, tiff) {
@@ -134,7 +169,7 @@
     return out;
   }
 
-  const api = { readExif, patchExif, insertExif, describe };
+  const api = { readExif, patchExif, insertExif, describe, takenTime, timeFromName };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SpoodExif = api;
 })(typeof self !== 'undefined' ? self : this);

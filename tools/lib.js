@@ -44,7 +44,14 @@ async function decodeLikeApp(file, maxSide) {
   const w = Math.round(w0 * s), h = Math.round(h0 * s);
   const { data } = await img.resize(w, h, { kernel: 'lanczos3', fit: 'fill' }).ensureAlpha().raw()
     .toBuffer({ resolveWithObject: true });
-  return { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.length), width: w, height: h, srcPixels: w0 * h0 };
+  return { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.length), width: w, height: h, srcPixels: w0 * h0, taken: takenOf(file) };
+}
+
+/** Capture time like the app: EXIF first, then the file name. */
+function takenOf(file) {
+  const E = require(path.join(ROOT, 'exif.js'));
+  try { const t = E.takenTime(E.readExif(fs.readFileSync(file).subarray(0, 1 << 20))); if (t != null) return t; } catch (e) { /* no EXIF */ }
+  return E.timeFromName(path.basename(file));
 }
 
 async function readRGBA(file, maxSide) {

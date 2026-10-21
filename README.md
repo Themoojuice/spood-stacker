@@ -24,7 +24,7 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 ## How it works (`engine.js`)
 1. The photos are put in focus order. The reference is the photo that is sharpest in the centre of the frame.
 2. Each photo is lined up with the reference (AKAZE features, a homography, and ECC fine-tuning). A local optical-flow correction is added only for photos where it measurably improves the alignment.
-3. **Photo selection.** A photo is left out if it can't be lined up, if it is a near-duplicate (same picture *and* sharp in the same places; the higher-resolution copy is kept), if the spider moved too much in it, or if it adds no sharp detail the others lack. The app lists which photos were left out and why.
+3. **Photo selection.** A photo is left out if it can't be lined up, if it matched far worse than the others and couldn't be fine-tuned, if it is a near-duplicate (same picture *and* sharp in the same places; the higher-resolution copy is kept), if the subject moved in it, or if it adds no sharp detail the others lack. Movement is judged where the photos are sharp (the subject), not over the whole frame, so a small subject that walked off is caught even when the background lines up perfectly. Capture times (EXIF, else the camera's file name) split the photos into moments: a photo taken more than 2 s apart from the rest (say, a second burst) is checked more strictly and is never the reference, but it is kept if it still lines up well (a still subject). The app lists which photos were left out and why.
 4. **Per-region merging.** Each pixel comes from whichever photos are sharpest there. So a photo with a sharp head and a blurry body contributes only its head. Coarse levels are blended by sharpness weights; fine detail is taken from the sharpest photo, and only where something was actually in focus.
 5. The image is cropped to the area covered by every photo used, and lightly sharpened. The lined-up photos are kept, cropped and sharpened the same way, for the retouch brush.
 
@@ -48,7 +48,7 @@ The synthetic scenes (`tests/make_synthetic.py`): `bark` (handheld lean-in with 
 `tests/app_check.py` drives the real app in headless Chromium at phone size (stack, EXIF, pick, paint, undo, save); `tests/retouch_effect.py` measures how much Pick-and-paint reduces the error in the worst regions.
 
 ## Laptop version (`desktop/`)
-`stacker.py` and `stack.bat` (Windows): drag a burst folder onto `stack.bat`. It saves `<folder>_stacked.png` and a quality-95 `<folder>_stacked.jpg`, both with the reference photo's EXIF (date, GPS, camera) and colour profile. `--jpeg-quality 0` skips the JPEG; `--no-exif` leaves the metadata out.
+`stacker.py` and `stack.bat` (Windows): drag a burst folder onto `stack.bat`. It leaves out photos whose subject moved, the same way as the app (`--keep-all` uses every photo). It saves `<folder>_stacked.png` and a quality-95 `<folder>_stacked.jpg`, both with the reference photo's EXIF (date, GPS, camera) and colour profile. `--jpeg-quality 0` skips the JPEG; `--no-exif` leaves the metadata out.
 
 ## Files
 - `index.html`: the app screen

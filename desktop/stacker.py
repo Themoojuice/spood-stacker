@@ -12,6 +12,9 @@ Pipeline
      parallax / body shifts, never invents hair-scale motion
   5. ghost mask: down-weight a frame wherever it still disagrees with
      the reference at low frequency (spider moved, flow failed)
+  5b. photo selection: leave out a photo whose subject moved (judged where
+     the photos are sharp, not over the whole frame), more strictly for a
+     photo taken more than 2 s apart from the rest (another burst)
   6. fusion: 'pmax' (pyramid max), 'dmap' (depth map), 'wpyr'
      (weighted pyramid), 'hybrid' (weighted pyramid at coarse levels,
      max-selection at fine levels where the stack is confidently textured)
@@ -19,7 +22,7 @@ Pipeline
   8. save PNG + high-quality JPEG, both carrying the reference photo's
      EXIF (date, GPS, camera) and colour profile
 """
-import argparse, glob, os, struct, time, zlib
+import argparse, calendar, glob, os, re, struct, time, zlib
 import cv2
 import numpy as np
 
@@ -188,7 +191,7 @@ def gate_flow(flow, ref_g, mov_g, gain=FLOW_GATE_GAIN if 'FLOW_GATE_GAIN' in glo
 
 
 # ---------- full alignment ----------
-def align(imgs, local='chain', ref=None, log=print):
+def align(imgs, local='chain', ref=None, log=print, avoid=()):
     n = len(imgs)
     grays = [to_gray(i) for i in imgs]
     masks = [valid_mask(g) for g in grays]
@@ -199,7 +202,8 @@ def align(imgs, local='chain', ref=None, log=print):
         # geometry, so if the subject moved, its sharpest view wins.
         h0, w0 = grays[0].shape
         cy, cx = slice(int(h0 * .3), int(h0 * .7)), slice(int(w0 * .3), int(w0 * .7))
-        ref = int(np.argmax([focus_measure(g[cy, cx]).mean() for g in grays]))
+        score = [focus_measure(g[cy, cx]).mean() for g in grays]
+        ref = int(np.argmax([-1 if i in avoid else v for i, v in enumerate(score)]))
     ref_pos = order.index(ref)
     log(f"focus order: {[int(o) + 1 for o in order]}  reference: frame {int(ref) + 1}")
     h, w = grays[0].shape
@@ -260,7 +264,7 @@ def align(imgs, local='chain', ref=None, log=print):
         warped = [aligned[i] for i in range(n)]
 
     common = np.logical_and.reduce([m > 0 for m in wmask])
-    return warped, common, order, ref
+    return warped, common, order, ref, wmask
 
 
 # ---------- 5. ghost weights ----------
@@ -273,6 +277,113 @@ def ghost_weights(aligned, ref, sigma=6.0, tol=0.06):
         g = np.clip(1.0 - (d - tol) / tol, 0, 1)
         out.append(cv2.GaussianBlur(g, (0, 0), 4))
     return out
+
+
+# ---------- 5b. photo selection ----------
+MOMENT_GAP = 2.0           # s between consecutive photos that starts a new "moment"
+SUBJECT_MOVED = 0.8        # subject agreement below this: moved (real bursts 0.96+)
+SUBJECT_MOVED_APART = 0.95  # stricter for a photo from a different moment
+
+
+def taken_time(path):
+    """Capture time in s (local clock), from EXIF DateTimeOriginal (+ sub-seconds),
+    else a camera file name like IMG_20260828_155557_3.jpg; None if neither."""
+    tiff, _ = read_meta(path)
+    if tiff and len(tiff) >= 8 and tiff[:2] in (b'II', b'MM'):
+        e = '<' if tiff[:2] == b'II' else '>'
+        u16 = lambda o: struct.unpack(e + 'H', tiff[o:o + 2])[0]
+        u32 = lambda o: struct.unpack(e + 'I', tiff[o:o + 4])[0]
+        found = {}
+        def ifd(off, name, seen):
+            if not off or off + 2 > len(tiff) or off in seen:
+                return
+            seen.add(off)
+            n = u16(off)
+            for i in range(n):
+                p = off + 2 + i * 12
+                if p + 12 > len(tiff):
+                    return
+                tag, typ, cnt = u16(p), u16(p + 2), u32(p + 4)
+                if typ == 2 and (name, tag) in (('exif', 0x9003), ('ifd0', 0x0132), ('exif', 0x9291)):
+                    o = p + 8 if cnt <= 4 else u32(p + 8)
+                    found[tag] = tiff[o:o + cnt].split(b'\0')[0].decode('ascii', 'ignore').strip()
+                if tag == 0x8769:
+                    ifd(u32(p + 8), 'exif', seen)
+        try:
+            ifd(u32(4), 'ifd0', set())
+        except struct.error:
+            pass
+        d = found.get(0x9003) or found.get(0x0132)
+        m = d and re.match(r'(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)', d)
+        if m:
+            sub = found.get(0x9291, '')
+            return calendar.timegm(tuple(int(x) for x in m.groups())) + (float('0.' + sub) if sub.isdigit() else 0)
+    m = re.search(r'(?:^|\D)(20\d\d)(\d\d)(\d\d)[_-](\d\d)(\d\d)(\d\d)(\d{3})?(?!\d)', os.path.basename(path))
+    if m:
+        g = [int(x) for x in m.groups()[:6]]
+        return calendar.timegm(tuple(g)) + (int(m.group(7)) / 1000 if m.group(7) else 0)
+    return None
+
+
+def moments(times):
+    """Signed gap (s) from each photo to the main moment (the largest group of
+    photos no more than MOMENT_GAP apart); 0 for photos in it or without a time."""
+    apart = [0.0] * len(times)
+    timed = sorted((t, i) for i, t in enumerate(times) if t is not None)
+    if len(timed) < 2:
+        return apart
+    groups = [[timed[0]]]
+    for a, b in zip(timed, timed[1:]):
+        if b[0] - a[0] > MOMENT_GAP:
+            groups.append([])
+        groups[-1].append(b)
+    main = max(groups, key=len)                  # ties go to the earlier group
+    t0, t1 = main[0][0], main[-1][0]
+    for g in groups:
+        if g is not main:
+            for t, i in g:
+                apart[i] = t - t1 if t > t1 else t - t0
+    return apart
+
+
+def gap_text(s):
+    d = f"{round(abs(s) / 60)} min" if abs(s) >= 120 else f"{max(1, round(abs(s)))} s"
+    return f"{d} {'after' if s > 0 else 'before'}"
+
+
+def subject_agreement(ref_img, cur_img, ghost):
+    """How well a photo agrees with the reference where either is sharp (0..1).
+    The frame-wide mean is dominated by background, so a small subject that
+    walked off barely moves it; this weights by sharpness."""
+    h, w = ghost.shape
+    sz = ((w + 1) // 2, (h + 1) // 2)
+    half = lambda im: focus_measure(cv2.resize(to_gray(im), sz, interpolation=cv2.INTER_AREA), 3)
+    mx = np.maximum(half(ref_img), half(cur_img))
+    g = cv2.resize(ghost, sz, interpolation=cv2.INTER_AREA)
+    top = np.percentile(mx[::5, ::5], 99) or 1e-9
+    wgt = np.minimum(1, mx / top)
+    wgt[wgt < 0.1] = 0
+    return float((wgt * g).sum() / wgt.sum()) if wgt.sum() > 0 else 1.0
+
+
+def select_photos(aligned, ghosts, ref, apart, log=print):
+    """Indices of the photos to keep (the reference always stays)."""
+    keep = []
+    for i in range(len(aligned)):
+        if i == ref:
+            keep.append(i); continue
+        sm = subject_agreement(aligned[ref], aligned[i], ghosts[i])
+        gap = apart[i]
+        if sm < SUBJECT_MOVED:
+            log(f"frame {i + 1} left out: " + (f"taken {gap_text(gap)} the others, and the subject had moved" if gap
+                                              else "the subject moved between photos") + f" (agreement {sm:.2f})")
+        elif gap and sm < SUBJECT_MOVED_APART:
+            log(f"frame {i + 1} left out: taken {gap_text(gap)} the others, and the subject had moved a little (agreement {sm:.2f})")
+        else:
+            if gap:
+                log(f"frame {i + 1}: taken {gap_text(gap)} the others but lines up well, kept")
+            keep.append(i)
+    return keep
 
 
 # ---------- 6. fusion ----------
@@ -624,16 +735,30 @@ def stack_paths(inputs, a, out=None):
     print(f"  {len(imgs)} frames, {imgs[0].shape[1]}x{imgs[0].shape[0]}")
     print("  Lining up photos (the slow part)...", flush=True)
     local = a.local if a.local != 'auto' else ('direct' if len(imgs) <= 15 else 'chain')
-    aligned, common, order, ref = align(imgs, local=local, ref=(a.ref - 1) if a.ref > 0 else None,
-                                        log=lambda m: print('   ' + m, flush=True))
-    ghosts = [np.ones(common.shape, np.float32)] * len(aligned) if a.no_ghost else ghost_weights(aligned, ref)
+    apart = [0.0] * len(imgs) if vids else moments([taken_time(p) for p in imgs_p])
+    if any(apart):
+        print("   photos were taken at different moments (more than 2 s apart)", flush=True)
+    aligned, common, order, ref, wmask = align(imgs, local=local, ref=(a.ref - 1) if a.ref > 0 else None,
+                                               log=lambda m: print('   ' + m, flush=True),
+                                               avoid={i for i, g in enumerate(apart) if g})
+    gw = None if (a.no_ghost and a.keep_all) else ghost_weights(aligned, ref)
+    ghosts = [np.ones(common.shape, np.float32)] * len(aligned) if a.no_ghost else gw
+    meta_ref = ref
+    if not a.keep_all:
+        keep = select_photos(aligned, gw, ref, apart, log=lambda m: print('   ' + m, flush=True))
+        if len(keep) < len(aligned):
+            aligned, ghosts = [aligned[i] for i in keep], [ghosts[i] for i in keep]
+            common = np.logical_and.reduce([wmask[i] > 0 for i in keep])
+            order = [keep.index(o) for o in order if o in keep]
+            ref = keep.index(ref)
+            print(f"   using {len(keep)} of {len(imgs)} photos", flush=True)
     print(f"  Lined up in {time.time() - t0:.0f}s. Merging...", flush=True)
     base, ext = os.path.splitext(out)
     if a.save_aligned:
         for i, im in enumerate(aligned):
             cv2.imwrite(f"{base}_aligned_{i + 1}.jpg", (np.clip(im, 0, 1) * 255).astype(np.uint8))
     # metadata comes from the reference photo (its geometry is the stack's geometry)
-    meta_src = None if (vids or a.no_exif) else imgs_p[ref]
+    meta_src = None if (vids or a.no_exif) else imgs_p[meta_ref]
     methods = list(METHODS) if a.method == 'all' else [a.method]
     for m in methods:
         fused, W = METHODS[m](aligned, ghosts)
@@ -671,6 +796,7 @@ def main():
     ap.add_argument('--local', default='auto', choices=['auto', 'chain', 'direct', 'none'],
                     help='optical-flow alignment mode')
     ap.add_argument('--no-ghost', action='store_true', help='skip moving-subject masking')
+    ap.add_argument('--keep-all', action='store_true', help="use every photo, even one whose subject moved")
     ap.add_argument('--every', type=int, default=0, help='video: take every Nth frame (0=auto)')
     ap.add_argument('--sharpen', type=float, default=0.35)
     ap.add_argument('--ref', type=int, default=0, help='reference frame number (1-based); 0 = auto')
