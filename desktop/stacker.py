@@ -3,22 +3,27 @@
 Salticid stacker: handheld lean-in focus stacking for phone macro bursts.
 
 Pipeline
-  1. load + vignette mask (the dark clamp/lens-barrel edge)
+  1. load + vignette mask (the dark clamp/lens-barrel edge: dark at the frame
+     edge, nearly black, and in the same place in most photos)
   2. order frames by focus similarity (no reliance on filenames/EXIF)
   3. global alignment: SIFT + RANSAC homography to a mid-stack reference,
      refined with ECC (enhanced correlation coefficient)
   4. local alignment: dense optical flow on defocus-equalised images,
      chained through focus-neighbours, smoothed so it only corrects
-     parallax / body shifts, never invents hair-scale motion
+     parallax / body shifts, never invents hair-scale motion. Worked out
+     both ways; used only where there-and-back agrees (not at occlusions or
+     on repeating mesh), decided pixel by pixel
   5. ghost mask: down-weight a frame wherever it still disagrees with
      the reference at low frequency (spider moved, flow failed)
   5b. photo selection: leave out a photo whose subject moved (judged where
      the photos are sharp, not over the whole frame), more strictly for a
      photo taken more than 2 s apart from the rest (another burst)
   6. fusion: 'pmax' (pyramid max), 'dmap' (depth map), 'wpyr'
-     (weighted pyramid), 'hybrid' (weighted pyramid at coarse levels,
-     max-selection at fine levels where the stack is confidently textured)
-  7. crop to area valid in all frames, mild finishing
+     (weighted pyramid), 'hybrid' (weighted pyramid at coarse levels; at fine
+     levels where the stack is confidently textured, the detail of every photo
+     nearly as sharp as the best is merged, minus any that disagree)
+     Each photo counts only where it has pixels of its own (coverage).
+  7. crop to the area at least one used photo saw, mild finishing
   8. save PNG + high-quality JPEG, both carrying the reference photo's
      EXIF (date, GPS, camera) and colour profile
 """
@@ -52,16 +57,64 @@ def guided_filter(I, p, r, eps):
     return cv2.boxFilter(a, -1, k) * I + cv2.boxFilter(b, -1, k)
 
 
-def valid_mask(gray, thresh=0.12):
-    """Exclude the black vignette from the lens clamp: dark regions that
-    touch the frame edge. Dark subject matter in the middle is kept."""
-    dark = (cv2.GaussianBlur(gray, (0, 0), 15) <= thresh).astype(np.uint8)
-    n, lab = cv2.connectedComponents(dark)
-    edge = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))) - {0}
-    vign = np.isin(lab, list(edge)) if edge else np.zeros_like(dark, bool)
-    m = (~vign).astype(np.uint8)
-    m = cv2.erode(m, np.ones((31, 31), np.uint8))
-    return m
+def vignette_masks(grays, thresh=0.12):
+    """Where each photo has usable pixels (1) vs the black clamp edge of a
+    clip-on lens (0). A dark region touching the frame edge is the clamp only if
+    it is nearly black inside and, with enough photos, sits in the same place in
+    most of them: the clamp moves with the camera, a dark subject (a black
+    caterpillar crossing the frame edge) does not."""
+    n = len(grays); h, w = grays[0].shape
+    q = 4; qw, qh = max(8, round(w / q)), max(8, round(h / q))
+    labs, vals, edges = [], [], []
+    frac = np.zeros((qh, qw), np.float32)
+    for g in grays:
+        s = cv2.resize(g, (qw, qh), interpolation=cv2.INTER_AREA)
+        dark = (cv2.GaussianBlur(s, (0, 0), 15 / q) <= thresh).astype(np.uint8)
+        nl, lab = cv2.connectedComponents(dark)
+        edge = np.zeros(nl, bool)
+        edge[np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))] = True
+        edge[0] = False
+        frac += edge[lab] / n
+        labs.append(lab); vals.append(s); edges.append(edge)
+    out = []
+    for lab, s, edge in zip(labs, vals, edges):
+        clamp = np.zeros(len(edge), bool)
+        for c in np.nonzero(edge)[0]:
+            m = lab == c
+            med, steady = float(np.median(s[m])), float(frac[m].mean())
+            clamp[c] = med < 0.035 or (med < 0.06 and (n < 4 or steady >= 0.6))
+            if n >= 4 and steady < 0.6:
+                clamp[c] = False
+        m = cv2.resize((~clamp[lab]).astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        r = max(31, round(0.025 * max(h, w))) | 1        # keep clear of the clamp's soft edge
+        out.append(cv2.erode(m, np.ones((r, r), np.uint8)))
+    return out
+
+
+def fill_uncovered(warped, wmask, ref):
+    """Fill each lined-up photo outside its own pixels with the average of the
+    photos that have pixels there (the reference where none does), so pyramids
+    see no false edges at its border. Returns each photo's share of the
+    reference's view."""
+    M = np.stack([m > 0 for m in wmask]).astype(np.float32)
+    cnt = M.sum(0)
+    avg = sum(w * m[..., None] for w, m in zip(warped, M)) / np.maximum(cnt, 1)[..., None]
+    fill = np.where((cnt > 0)[..., None], avg, warped[ref])
+    share = []
+    for i in range(len(warped)):
+        own = M[i] > 0
+        warped[i] = np.where(own[..., None], warped[i], fill).astype(np.float32)
+        share.append(float((own & (M[ref] > 0)).sum() / max(1, (M[ref] > 0).sum())))
+    return share
+
+
+def cover_map(mask, band_frac=0.015):
+    """1 well inside a photo's own pixels, easing to 0 over a band of ~1.5% of
+    the frame at its border (the frame edge itself is not a border)."""
+    m = cv2.copyMakeBorder((mask > 0).astype(np.uint8), 1, 1, 1, 1, cv2.BORDER_REPLICATE)
+    d = cv2.distanceTransform(m, cv2.DIST_L2, 3)[1:-1, 1:-1]
+    t = np.clip(d / max(4.0, band_frac * max(mask.shape)), 0, 1)
+    return (t * t * (3 - 2 * t)).astype(np.float32)
 
 
 # ---------- 1. load ----------
@@ -122,11 +175,60 @@ def homography(src_g, dst_g, mask_src, mask_dst):
     H, inl = cv2.findHomography(p1, p2, cv2.USAC_MAGSAC, 3.0, maxIters=5000, confidence=0.999)
     if H is None:
         return np.eye(3, dtype=np.float32), 0
+    m = inl.ravel() > 0
+    homography.pairs = (p1[m], p2[m])        # the inlier matches, for checking the fine-tune
     return H.astype(np.float32), int(inl.sum())
 
 
-def ecc_refine(src_g, dst_g, H, mask, scale=0.5):
-    """Refine H with ECC on gradient magnitude (focus-insensitive-ish)."""
+def pair_error(H, pairs):
+    """Median distance between where a line-up puts matched features and where they matched."""
+    if pairs is None or not len(pairs[0]):
+        return 0.0
+    p = cv2.perspectiveTransform(pairs[0].reshape(-1, 1, 2).astype(np.float32), H.astype(np.float32)).reshape(-1, 2)
+    return float(np.median(np.hypot(*(p - pairs[1]).T)))
+
+
+def repeat_score(gray):
+    """How strongly fine detail repeats (an insect screen, woven fabric), 0 = not at all.
+    The autocorrelation of fine detail falls away from zero shift; a repeating pattern
+    makes it come back up at the repeat distance. The score is how far it rebounds."""
+    s = min(1.0, 1024 / max(gray.shape))
+    r = cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA).astype(np.float32)
+    hp = r - cv2.GaussianBlur(r, (0, 0), 6)
+    F = np.fft.rfft2(hp)
+    A = np.fft.irfft2(F * np.conj(F), s=hp.shape)
+    A = A / (A[0, 0] or 1e-12)
+    H, W = A.shape
+    rmax = min(W, H) // 4
+    val = lambda dx, dy: A[dy % H, dx % W]
+    best = 0.0
+    for dy in range(-rmax, rmax + 1):
+        for dx in range(0, rmax + 1):
+            rr = dx * dx + dy * dy
+            if rr < 9 or rr > rmax * rmax:
+                continue
+            v = val(dx, dy)
+            if v < 0.15:
+                continue
+            if any(val(dx + i, dy + j) > v for j in (-1, 0, 1) for i in (-1, 0, 1) if i or j):
+                continue
+            steps = int(np.ceil(np.sqrt(rr) * 2))
+            lo = min([v] + [val(round(dx * t / steps), round(dy * t / steps)) for t in range(1, steps)])
+            best = max(best, v - lo)
+    return float(best)
+
+
+REPEAT = 0.4    # repeat score above this: a mesh-like pattern is in view
+
+
+def ecc_refine(src_g, dst_g, H, mask, scale=0.5, pairs=None, repeating=False):
+    """Refine H with ECC on gradient magnitude (focus-insensitive-ish). The result must
+    still agree with the matched features. With repeating texture in view (an insect
+    screen) ECC locks onto whichever cells are nearest and shears the background, and
+    two photos fine-tuned that way end up a fraction of a cell apart: there the
+    features' line-up is kept and the flow does the rest."""
+    if repeating:
+        return H, False
     def grad(g):
         g = cv2.GaussianBlur(g, (0, 0), 2.0)
         gx = cv2.Sobel(g, cv2.CV_32F, 1, 0); gy = cv2.Sobel(g, cv2.CV_32F, 0, 1)
@@ -140,9 +242,17 @@ def ecc_refine(src_g, dst_g, H, mask, scale=0.5):
     try:
         _, W = cv2.findTransformECC(d, s, W, cv2.MOTION_HOMOGRAPHY,
                                     (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6), m, 5)
-        return (np.linalg.inv(np.linalg.inv(S) @ W @ S)).astype(np.float32), True
+        Hn = (np.linalg.inv(np.linalg.inv(S) @ W @ S)).astype(np.float32)
     except cv2.error:
         return H, False
+    # the fine-tune must still agree with the matched features: on repeating texture (an
+    # insect screen) it can lock onto the wrong cells and shear the whole photo
+    if not np.isfinite(Hn).all():
+        return H, False
+    e0, e1 = pair_error(H, pairs), pair_error(Hn, pairs)
+    if not e1 < max(4.0, 0.004 * max(src_g.shape), 2 * e0):
+        return H, False
+    return Hn, True
 
 
 # ---------- 4. local alignment ----------
@@ -154,25 +264,43 @@ def dense_flow(ref_g, mov_g, mask=None, blur=2.5, smooth=4.0, max_px=None):
     b = (np.clip(cv2.GaussianBlur(mov_g, (0, 0), blur), 0, 1) * 255).astype(np.uint8)
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
     dis.setFinestScale(1)
-    flow = dis.calc(a, b, None)
+    flow = dis.calc(a, b, None)                   # reference -> photo
+    back = dis.calc(b, a, None)                   # photo -> reference
+    # two-way check: following the flow there and back should land where it
+    # started (within ~0.1% of the frame); it fails at occlusions and on
+    # repeating texture, and there the plain line-up is kept
+    tau = 0.001 * max(ref_g.shape)
+    e = np.sqrt(((flow + remap(back, flow, cv2.INTER_LINEAR)) ** 2).sum(-1))
+    fb = np.clip(1 - (e - tau) / (2 * tau), 0, 1).astype(np.float32)
+    # smoothness check: real parallax and body shifts change gently across the frame;
+    # flow that ripples (locked onto different cells of a repeating mesh from place to
+    # place) passes the two-way check but bends straight threads into waves
+    rip = 0
+    for c in range(2):
+        f = cv2.GaussianBlur(flow[..., c], (0, 0), 2)
+        rip = rip + np.abs(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3, scale=0.125)) + np.abs(cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3, scale=0.125))
+    rip = cv2.GaussianBlur(rip, (0, 0), 6)
+    fb *= np.clip(1 - (rip - 0.08) / 0.12, 0, 1)
+    fb = cv2.GaussianBlur(fb, (0, 0), 2 * tau)
     m = np.ones(ref_g.shape, np.float32) if mask is None else mask.astype(np.float32)
     # confidence: low where the blurred images still disagree after warping (occlusion / failure)
     warped_b = remap(b.astype(np.float32), flow)
-    conf = np.exp(-np.abs(warped_b - a.astype(np.float32)) / 12.0) * m
+    conf = np.exp(-np.abs(warped_b - a.astype(np.float32)) / 12.0) * m * fb
     den = cv2.GaussianBlur(conf, (0, 0), smooth) + 1e-4
     for c in range(2):
         flow[..., c] = cv2.GaussianBlur(flow[..., c] * conf, (0, 0), smooth) / den
+    flow *= fb[..., None]
     if max_px is None:
         max_px = 0.04 * max(ref_g.shape)          # parallax/body shift, not teleportation
     mag = np.sqrt((flow ** 2).sum(-1, keepdims=True))
     flow *= np.minimum(1.0, max_px / (mag + 1e-6))
-    return flow
+    return flow, fb
 
 
-def remap(img, flow):
+def remap(img, flow, interp=cv2.INTER_LANCZOS4):
     h, w = flow.shape[:2]
     gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    return cv2.remap(img, gx + flow[..., 0], gy + flow[..., 1], cv2.INTER_LANCZOS4,
+    return cv2.remap(img, gx + flow[..., 0], gy + flow[..., 1], interp,
                      borderMode=cv2.BORDER_REFLECT)
 
 
@@ -194,7 +322,7 @@ def gate_flow(flow, ref_g, mov_g, gain=FLOW_GATE_GAIN if 'FLOW_GATE_GAIN' in glo
 def align(imgs, local='chain', ref=None, log=print, avoid=()):
     n = len(imgs)
     grays = [to_gray(i) for i in imgs]
-    masks = [valid_mask(g) for g in grays]
+    masks = vignette_masks(grays)
     order = order_frames(grays)
     if ref is None:
         # reference = frame sharpest in the centre of the frame (where the
@@ -206,6 +334,9 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
         ref = int(np.argmax([-1 if i in avoid else v for i, v in enumerate(score)]))
     ref_pos = order.index(ref)
     log(f"focus order: {[int(o) + 1 for o in order]}  reference: frame {int(ref) + 1}")
+    repeating = any(repeat_score(g) > REPEAT for g in grays)
+    if repeating:
+        log("repeating texture in view (a mesh?): lined up from features only")
     h, w = grays[0].shape
     Hs = {ref: np.eye(3, dtype=np.float32)}
     # chain outward from the reference through focus-neighbours
@@ -214,14 +345,20 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
         pos = ref_pos + direction
         while 0 <= pos < n:
             cur = order[pos]
+            homography.pairs = None
             Hn, inl = homography(grays[cur], grays[prev], masks[cur], masks[prev])
             H = Hs[prev] @ Hn
+            # the matched features in reference coordinates: the fine-tune must still agree with them
+            pr = homography.pairs
+            pairs = (pr[0], cv2.perspectiveTransform(pr[1].reshape(-1, 1, 2), Hs[prev]).reshape(-1, 2)) if pr is not None else None
+            homography.pairs = None
             Hd, inl_direct = homography(grays[cur], grays[ref], masks[cur], masks[ref])
             if inl_direct > 1.5 * inl:          # direct match clearly better
                 H = Hd
-            H, ok = ecc_refine(grays[cur], grays[ref], H, masks[ref])
+                pairs = homography.pairs
+            H, ok = ecc_refine(grays[cur], grays[ref], H, masks[ref], pairs=pairs, repeating=repeating)
             Hs[cur] = H
-            log(f"  frame {cur + 1}: inliers neighbour={inl} direct={inl_direct} ecc={'ok' if ok else 'fail'}")
+            log(f"  frame {cur + 1}: inliers neighbour={inl} direct={inl_direct} ecc={'ok' if ok else ('off' if repeating else 'fail')}")
             prev, pos = cur, pos + direction
 
     warped, wmask = [None] * n, [None] * n
@@ -229,6 +366,11 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
         warped[i] = cv2.warpPerspective(imgs[i], Hs[i], (w, h), flags=cv2.INTER_LANCZOS4,
                                         borderMode=cv2.BORDER_REFLECT)
         wmask[i] = cv2.warpPerspective(masks[i], Hs[i], (w, h), flags=cv2.INTER_NEAREST)
+    # a photo framed differently covers only part of the reference's view
+    for i, c in enumerate(fill_uncovered(warped, wmask, ref)):
+        if i != ref and c < 0.97:
+            log(f"  frame {i + 1}: covers {round(c * 100)}% of the reference's view")
+    trust = [np.ones((h, w), np.float32) for _ in range(n)]
 
     if local in ('chain', 'direct'):
         # chain: each frame aligned to its already-aligned focus-neighbour
@@ -241,42 +383,46 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
                 cur = order[pos]
                 tgt = prev if local == 'chain' else ref
                 fm_mask = (wmask[tgt] > 0) & (wmask[cur] > 0)
-                flow = dense_flow(to_gray(aligned[tgt]), to_gray(warped[cur]), fm_mask)
-                flow = gate_flow(flow, to_gray(aligned[tgt]), to_gray(warped[cur]))
+                tg, cg = to_gray(aligned[tgt]), to_gray(warped[cur])
+                plain = ghost_map(cv2.GaussianBlur(tg, (0, 0), 6.0), cg)   # agreement of the plain line-up
+                flow, fb = dense_flow(tg, cg, fm_mask)
+                flow = gate_flow(flow, tg, cg)
                 cand = remap(warped[cur], flow)
-                # accept the local warp only if it improves whole-frame agreement;
-                # on some scenes (repetitive mesh, big pose changes) flow makes it worse
+                # the warp is decided pixel by pixel (two-way check, gate); as a last
+                # check it must not make whole-frame agreement worse
                 band = lambda g: cv2.GaussianBlur(g, (0, 0), 2) - cv2.GaussianBlur(g, (0, 0), 10)
-                T = band(to_gray(aligned[tgt]))[fm_mask]
-                ncc_g = np.corrcoef(T, band(to_gray(warped[cur]))[fm_mask])[0, 1]
+                T = band(tg)[fm_mask]
+                ncc_g = np.corrcoef(T, band(cg)[fm_mask])[0, 1]
                 ncc_f = np.corrcoef(T, band(to_gray(cand))[fm_mask])[0, 1]
                 mag = np.sqrt((flow ** 2).sum(-1))
-                if ncc_f >= ncc_g + 0.01:
+                share = float((mag[fm_mask] > 0.5).mean()) if fm_mask.any() else 0.0
+                if share > 0 and ncc_f >= ncc_g + 0.002:
                     aligned[cur] = cand
-                    wmask[cur] = remap(wmask[cur].astype(np.float32), flow) > 0.5
-                    verdict = 'kept'
+                    wmask[cur] = (remap(wmask[cur].astype(np.float32), flow, cv2.INTER_LINEAR) > 0.5).astype(np.uint8)
+                    verdict = f'used on {max(1, round(share * 100))}% of it'
                 else:
                     aligned[cur] = warped[cur]
-                    verdict = 'rejected'
-                log(f"  frame {cur + 1}: local flow median {np.median(mag):.1f}px, "
-                    f"agreement {ncc_g:.3f} -> {ncc_f:.3f} ({verdict})")
+                    verdict = 'not needed'
+                # trust: the two-way check passed, or the plain line-up already agreed
+                trust[cur] = np.maximum(fb, plain)
+                log(f"  frame {cur + 1}: local flow {verdict}, "
+                    f"agreement {ncc_g:.3f} -> {ncc_f:.3f}")
                 prev, pos = cur, pos + direction
         warped = [aligned[i] for i in range(n)]
 
-    common = np.logical_and.reduce([m > 0 for m in wmask])
-    return warped, common, order, ref, wmask
+    return warped, order, ref, wmask, trust
 
 
 # ---------- 5. ghost weights ----------
+def ghost_map(ref_blur, gray, sigma=6.0, tol=0.06):
+    d = np.abs(cv2.GaussianBlur(gray, (0, 0), sigma) - ref_blur)
+    return cv2.GaussianBlur(np.clip(1.0 - (d - tol) / tol, 0, 1).astype(np.float32), (0, 0), 4)
+
+
 def ghost_weights(aligned, ref, sigma=6.0, tol=0.06):
     """1 where a frame agrees with the reference at low frequency, ->0 where not."""
     R = cv2.GaussianBlur(to_gray(aligned[ref]), (0, 0), sigma)
-    out = []
-    for i, a in enumerate(aligned):
-        d = np.abs(cv2.GaussianBlur(to_gray(a), (0, 0), sigma) - R)
-        g = np.clip(1.0 - (d - tol) / tol, 0, 1)
-        out.append(cv2.GaussianBlur(g, (0, 0), 4))
-    return out
+    return [ghost_map(R, to_gray(a), sigma, tol) for a in aligned]
 
 
 # ---------- 5b. photo selection ----------
@@ -351,28 +497,32 @@ def gap_text(s):
     return f"{d} {'after' if s > 0 else 'before'}"
 
 
-def subject_agreement(ref_img, cur_img, ghost):
-    """How well a photo agrees with the reference where either is sharp (0..1).
-    The frame-wide mean is dominated by background, so a small subject that
-    walked off barely moves it; this weights by sharpness."""
+def subject_agreement(ref_img, cur_img, ghost, cover=None):
+    """How well a photo agrees with the reference where either is sharp (0..1),
+    only where the photo has pixels of its own. The frame-wide mean is dominated
+    by background, so a small subject that walked off barely moves it; this
+    weights by sharpness."""
     h, w = ghost.shape
     sz = ((w + 1) // 2, (h + 1) // 2)
     half = lambda im: focus_measure(cv2.resize(to_gray(im), sz, interpolation=cv2.INTER_AREA), 3)
     mx = np.maximum(half(ref_img), half(cur_img))
+    if cover is not None:
+        mx[cv2.resize(cover, sz, interpolation=cv2.INTER_AREA) < 0.5] = 0
     g = cv2.resize(ghost, sz, interpolation=cv2.INTER_AREA)
-    top = np.percentile(mx[::5, ::5], 99) or 1e-9
+    pos = mx[::5, ::5]; pos = pos[pos > 0]
+    top = (np.percentile(pos, 99) if pos.size else 0) or 1e-9
     wgt = np.minimum(1, mx / top)
     wgt[wgt < 0.1] = 0
     return float((wgt * g).sum() / wgt.sum()) if wgt.sum() > 0 else 1.0
 
 
-def select_photos(aligned, ghosts, ref, apart, log=print):
+def select_photos(aligned, ghosts, ref, apart, log=print, covers=None):
     """Indices of the photos to keep (the reference always stays)."""
     keep = []
     for i in range(len(aligned)):
         if i == ref:
             keep.append(i); continue
-        sm = subject_agreement(aligned[ref], aligned[i], ghosts[i])
+        sm = subject_agreement(aligned[ref], aligned[i], ghosts[i], covers[i] if covers else None)
         gap = apart[i]
         if sm < SUBJECT_MOVED:
             log(f"frame {i + 1} left out: " + (f"taken {gap_text(gap)} the others, and the subject had moved" if gap
@@ -411,8 +561,10 @@ def collapse(lp):
 
 def soft_weights(aligned, ghosts, power=4.0, sigma=4.0, refine=True):
     F = np.stack([focus_measure(to_gray(a), sigma) for a in aligned])
-    F = F / (F.max(0, keepdims=True) + 1e-9)          # relative sharpness
-    W = (F ** power) * np.stack(ghosts) + 1e-6
+    G = np.stack(ghosts)
+    # relative sharpness, against the sharpest photo that has pixels there
+    F = np.minimum(1, F / (np.where(G > 0.02, F, 0).max(0, keepdims=True) + 1e-9))
+    W = (F ** power) * G + 1e-6
     W /= W.sum(0, keepdims=True)
     if refine:
         guide = to_gray(np.mean(aligned, 0))
@@ -452,15 +604,19 @@ def fuse_pmax(aligned, ghosts, levels=6):
     return collapse(out), None
 
 
-def fuse_hybrid(aligned, ghosts, levels=6, fine_levels=3, sel_sigma=None):
-    """Weighted pyramid everywhere; at the finest levels, switch to
-    max-selection where the stack has strong, confident texture (setae)."""
+def fuse_hybrid(aligned, ghosts, levels=6, fine_levels=3, sel_sigma=None, valid=None):
+    """Weighted pyramid everywhere; at the finest levels, where the stack has
+    strong, confident texture (setae), the detail comes from the sharpest photos:
+    every photo at least MERGE_FROM as sharp as the best at a spot is merged in,
+    as far as its detail agrees with the best photo's (ROBUST x the band's noise)."""
     W, F = soft_weights(aligned, ghosts, power=4.0)
     lps = [lap_pyr(a, levels) for a in aligned]
     gws = [gauss_pyr(w, levels) for w in W]
     gh = [gauss_pyr(g, levels) for g in ghosts]
     # texture mask: high max focus relative to local median focus -> hairy
     Fm = np.stack([focus_measure(to_gray(a), 2.0) for a in aligned])
+    if valid is not None:                           # only where a photo has pixels of its own
+        Fm = Fm * np.stack([v > 0 for v in valid])
     tex = Fm.max(0)
     tex = tex / (cv2.GaussianBlur(tex, (0, 0), 25) + 1e-6)
     t0, t1 = TEX
@@ -479,10 +635,25 @@ def fuse_hybrid(aligned, ghosts, levels=6, fine_levels=3, sel_sigma=None):
         wts = np.stack([g[L] for g in gws])
         blend = np.einsum('nhw,nhwc->hwc', wts, stack)
         if L < fine_levels:
-            e = np.abs(stack).sum(-1)
-            e = np.stack([cv2.GaussianBlur(x, (0, 0), SEL_SIGMA if sel_sigma is None else sel_sigma) for x in e]) * np.stack([g[L] for g in gh])
+            raw = np.abs(stack).sum(-1)
+            G = np.stack([g[L] for g in gh])
+            e = np.stack([cv2.GaussianBlur(x, (0, 0), SEL_SIGMA if sel_sigma is None else sel_sigma) for x in raw]) * G
             k = e.argmax(0)
             mx = np.take_along_axis(stack, k[None, ..., None], 0)[0]
+            if MERGE:
+                # noise of this band: the typical detail where photos are out of focus
+                noise = min((np.percentile(r[::6, ::6][g[::6, ::6] > 0.5], 25) for r, g in zip(raw, G)
+                             if (g[::6, ::6] > 0.5).sum() > 100), default=0.01)
+                lim = ROBUST * max(noise, 1e-4)
+                be = e.max(0) + 1e-12
+                num, den = np.zeros_like(mx), np.zeros(mx.shape[:2], np.float32)
+                for i in range(len(stack)):                  # one photo at a time (memory)
+                    w = np.clip((e[i] / be - MERGE_FROM) / (MERGE_FULL - MERGE_FROM), 0, 1) ** 2
+                    d = np.abs(stack[i] - mx).sum(-1) / lim
+                    w = w / (1 + d * d)
+                    w[w < 1e-3] = 0
+                    num += w[..., None] * stack[i]; den += w
+                mx = num / np.maximum(den, 1e-9)[..., None]
             a = tp[L][..., None]
             blend = a * mx + (1 - a) * blend
         out.append(blend)
@@ -490,16 +661,20 @@ def fuse_hybrid(aligned, ghosts, levels=6, fine_levels=3, sel_sigma=None):
 
 
 SEL_SIGMA = 1.0     # smoothing of the per-pixel 'which frame is sharpest' choice at fine levels
+MERGE = True        # merge fine detail from every photo nearly as sharp as the best (else: the best only)
+MERGE_FROM, MERGE_FULL, ROBUST = 0.55, 0.9, 2.5
 TEX = (0.0, 0.5)   # texture-mask threshold/softness for hybrid max-selection
 METHODS = {'dmap': fuse_dmap, 'wpyr': fuse_wpyr, 'pmax': fuse_pmax, 'hybrid': fuse_hybrid}
 
 
 # ---------- 7. finishing ----------
 def crop_valid(img, common, f=4):
-    """Largest axis-aligned rectangle containing only pixels valid in every
-    frame (maximal-rectangle-in-histogram on a 1/f-scale mask)."""
+    """Largest axis-aligned rectangle containing only valid pixels whose shape stays
+    within 15% of the frame's own (so a landscape burst isn't cropped to a portrait
+    strip), from the maximal rectangles of a 1/f-scale mask."""
     m = common.astype(np.uint8)
     h, w = m.shape
+    ar = w / h
     # a coarse cell counts as valid only if all its pixels are valid
     small = cv2.erode(m, np.ones((f, f), np.uint8))[::f, ::f]
     H, W = small.shape
@@ -513,9 +688,15 @@ def crop_valid(img, common, f=4):
             start = c
             while stack and stack[-1][1] >= cur:
                 st, ht = stack.pop()
-                area = ht * (c - st)
-                if area > best[0]:
-                    best = (area, st, r - ht + 1, c - 1, r)
+                if ht > 0:
+                    cw, ch = c - st, ht
+                    if cw / ch > ar * 1.15:
+                        cw = int(ch * ar * 1.15)
+                    elif cw / ch < ar / 1.15:
+                        ch = int(cw * 1.15 / ar)
+                    if cw * ch > best[0]:
+                        x0c, y0c = st + (c - st - cw) // 2, (r - ht + 1) + (ht - ch) // 2
+                        best = (cw * ch, x0c, y0c, x0c + cw - 1, y0c + ch - 1)
                 start = st
             stack.append((start, cur))
     if best[0] == 0:
@@ -738,20 +919,26 @@ def stack_paths(inputs, a, out=None):
     apart = [0.0] * len(imgs) if vids else moments([taken_time(p) for p in imgs_p])
     if any(apart):
         print("   photos were taken at different moments (more than 2 s apart)", flush=True)
-    aligned, common, order, ref, wmask = align(imgs, local=local, ref=(a.ref - 1) if a.ref > 0 else None,
-                                               log=lambda m: print('   ' + m, flush=True),
-                                               avoid={i for i, g in enumerate(apart) if g})
+    aligned, order, ref, wmask, trust = align(imgs, local=local, ref=(a.ref - 1) if a.ref > 0 else None,
+                                              log=lambda m: print('   ' + m, flush=True),
+                                              avoid={i for i, g in enumerate(apart) if g})
+    covers = [cover_map(m) for m in wmask]
     gw = None if (a.no_ghost and a.keep_all) else ghost_weights(aligned, ref)
-    ghosts = [np.ones(common.shape, np.float32)] * len(aligned) if a.no_ghost else gw
+    ghosts = [np.ones(wmask[0].shape, np.float32)] * len(aligned) if a.no_ghost else gw
+    # what each photo may contribute: it has pixels there, agrees with the reference, can be trusted
+    ghosts = [g * c * t for g, c, t in zip(ghosts, covers, trust)]
     meta_ref = ref
+    keep = list(range(len(aligned)))
     if not a.keep_all:
-        keep = select_photos(aligned, gw, ref, apart, log=lambda m: print('   ' + m, flush=True))
+        keep = select_photos(aligned, gw, ref, apart, log=lambda m: print('   ' + m, flush=True), covers=covers)
         if len(keep) < len(aligned):
             aligned, ghosts = [aligned[i] for i in keep], [ghosts[i] for i in keep]
-            common = np.logical_and.reduce([wmask[i] > 0 for i in keep])
             order = [keep.index(o) for o in order if o in keep]
             ref = keep.index(ref)
             print(f"   using {len(keep)} of {len(imgs)} photos", flush=True)
+    valid = [wmask[i] for i in keep]
+    # crop: everything at least one used photo really saw (not just what all of them saw)
+    seen = np.logical_or.reduce([v > 0 for v in valid])
     print(f"  Lined up in {time.time() - t0:.0f}s. Merging...", flush=True)
     base, ext = os.path.splitext(out)
     if a.save_aligned:
@@ -761,8 +948,8 @@ def stack_paths(inputs, a, out=None):
     meta_src = None if (vids or a.no_exif) else imgs_p[meta_ref]
     methods = list(METHODS) if a.method == 'all' else [a.method]
     for m in methods:
-        fused, W = METHODS[m](aligned, ghosts)
-        fused, box = crop_valid(finish(fused, a.sharpen), common)
+        fused, W = METHODS[m](aligned, ghosts, valid=valid) if m == 'hybrid' else METHODS[m](aligned, ghosts)
+        fused, box = crop_valid(finish(fused, a.sharpen), seen)
         o = out if len(methods) == 1 else f"{base}_{m}{ext}"
         if not o.lower().endswith('.png'):
             o = os.path.splitext(o)[0] + '.png'
