@@ -19,7 +19,7 @@ Writes, per burst:
 
     python tests/make_synthetic.py            # all scenes
     python tests/make_synthetic.py legs       # one scene
-    (scenes: bark, legs, still, moved, and dup = bark plus an edited duplicate)
+    (scenes: bark, legs, still, moved, drift, dense, mesh, and dup = bark plus an edited duplicate)
 """
 import io, math, os, sys
 import cv2
@@ -60,6 +60,22 @@ def bark(rng):
     col = np.dstack([v * 0.78, v * 0.92, v * 1.05]).clip(0, 1)            # RGB, greyish-brown
     yy = np.linspace(0, 1, H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
     depth = 0.62 + 0.38 * (1 - yy)                                           # near at the bottom, far at the top
+    return Part(col.astype(np.float32), np.ones((H, W), np.float32), depth.astype(np.float32))
+
+
+def mesh(rng):
+    """Insect screen: a fine regular grid of dark threads (repeating texture that
+    fools local motion estimates), tilted like the bark plane."""
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    period, thick = 15.0, 2.2
+    gx = np.abs(((xx + 0.04 * yy) % period) - period / 2)
+    gy = np.abs(((yy - 0.03 * xx) % period) - period / 2)
+    line = np.maximum(np.clip(thick / 2 + 0.6 - (period / 2 - gx), 0, 1), np.clip(thick / 2 + 0.6 - (period / 2 - gy), 0, 1))
+    shade = 0.62 + 0.05 * fractal(rng, H, W, 4, 3)
+    v = shade * (1 - 0.78 * line)
+    col = np.dstack([v * 0.95, v * 0.97, v * 1.0]).clip(0, 1)
+    yy1 = np.linspace(0, 1, H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
+    depth = 0.62 + 0.38 * (1 - yy1)
     return Part(col.astype(np.float32), np.ones((H, W), np.float32), depth.astype(np.float32))
 
 
@@ -197,11 +213,11 @@ def vignette(img):
     return img * v[..., None]
 
 
-def cam_motion(rng, k, n, lean):
+def cam_motion(rng, k, n, lean, drift=18):
     """Homography for frame k: drift, tilt, and lean-in magnification."""
     s = 1 + lean * k / max(1, n - 1)
     a = math.radians(rng.normal(0, 0.5))
-    tx, ty = rng.normal(0, 18), rng.normal(0, 18)
+    tx, ty = rng.normal(0, drift), rng.normal(0, drift)
     c, si = math.cos(a) * s, math.sin(a) * s
     T = np.array([[c, -si, 0], [si, c, 0], [0, 0, 1]], np.float64)
     C = np.array([[1, 0, W / 2], [0, 1, H / 2], [0, 0, 1]], np.float64)
@@ -258,13 +274,25 @@ SCENES = {
                   legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
     'moved': dict(n=8, f=(0.14, 0.64), lean=0.03, par=0.04, orient=1, seed=7, moved=(-40, 25),
                   legs=[(0.32, 0.50)] * 8),
+    # framed far apart: each photo covers a different part of the scene (like a
+    # burst where the phone wandered), so no area is covered by every photo
+    'drift': dict(n=8, f=(0.14, 0.66), lean=0.04, par=0.05, orient=1, seed=21, moved=None, drift=170,
+                  legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # a dense burst (fine focus steps, so neighbours are nearly as sharp as each other)
+    # at a phone's noise level in shade: what merging detail from several photos is for
+    'dense': dict(n=16, f=(0.16, 0.66), lean=0.04, par=0.05, orient=1, seed=13, moved=None, noise=5.0,
+                  legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # spider on an insect screen: repeating texture behind a subject with parallax
+    'mesh': dict(n=8, f=(0.14, 0.66), lean=0.05, par=0.07, orient=1, seed=5, moved=None, bg='mesh',
+                 legs=[(0.30, 0.10), (0.35, 0.70), (0.30, 0.15), (0.40, 0.75),
+                       (0.30, 0.08), (0.35, 0.68), (0.32, 0.12), (0.40, 0.72)]),
 }
 
 
 def make(name):
     sc = SCENES[name]
     rng = np.random.default_rng(sc['seed'])
-    bg = bark(rng)
+    bg = mesh(rng) if sc.get('bg') == 'mesh' else bark(rng)
     base = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'])
     moved = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'],
                    shift=sc['moved']) if sc['moved'] else None
@@ -276,7 +304,7 @@ def make(name):
     n = sc['n']
     for k in range(n):
         focus = sc['f'][1] - (sc['f'][1] - sc['f'][0]) * k / (n - 1)       # lean in: far first, near last
-        Mc = np.eye(3) if sc.get('still') else cam_motion(rng, k, n, sc['lean'])
+        Mc = np.eye(3) if sc.get('still') else cam_motion(rng, k, n, sc['lean'], sc.get('drift', 18))
         src = moved if (moved is not None and k >= n - 2) else base
         parts = [warp_part(bg, Mc @ parallax(np.float32(bg.depth.mean()), k, n, sc['par']))]
         for p in src:
@@ -284,7 +312,7 @@ def make(name):
             parts.append(warp_part(p, Mc @ parallax(dm, k, n, sc['par'])))
         img = vignette(render(parts, focus))
         truth = vignette(achievable(parts, *sc['f']))
-        img = img + rng.normal(0, 1.6 / 255, img.shape).astype(np.float32)
+        img = img + rng.normal(0, sc.get('noise', 1.6) / 255, img.shape).astype(np.float32)
         u8 = (np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)
         t8 = (np.clip(truth, 0, 1) * 255 + 0.5).astype(np.uint8)
         cv2.imwrite(os.path.join(d, 'truth', f'{k + 1:02d}.png'), cv2.cvtColor(t8, cv2.COLOR_RGB2BGR))
