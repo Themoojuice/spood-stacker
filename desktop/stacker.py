@@ -267,21 +267,15 @@ def dense_flow(ref_g, mov_g, mask=None, blur=2.5, smooth=4.0, max_px=None):
     flow = dis.calc(a, b, None)                   # reference -> photo
     back = dis.calc(b, a, None)                   # photo -> reference
     # two-way check: following the flow there and back should land where it
-    # started (within ~0.1% of the frame); it fails at occlusions and on
-    # repeating texture, and there the plain line-up is kept
-    tau = 0.001 * max(ref_g.shape)
-    e = np.sqrt(((flow + remap(back, flow, cv2.INTER_LINEAR)) ** 2).sum(-1))
-    fb = np.clip(1 - (e - tau) / (2 * tau), 0, 1).astype(np.float32)
-    # smoothness check: real parallax and body shifts change gently across the frame;
-    # flow that ripples (locked onto different cells of a repeating mesh from place to
-    # place) passes the two-way check but bends straight threads into waves
-    rip = 0
-    for c in range(2):
-        f = cv2.GaussianBlur(flow[..., c], (0, 0), 2)
-        rip = rip + np.abs(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3, scale=0.125)) + np.abs(cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3, scale=0.125))
-    rip = cv2.GaussianBlur(rip, (0, 0), 6)
-    fb *= np.clip(1 - (rip - 0.08) / 0.12, 0, 1)
-    fb = cv2.GaussianBlur(fb, (0, 0), 2 * tau)
+    # started (within ~0.2% of the frame); it fails at occlusions, and there the
+    # plain line-up is kept. DIS flow is noisy pixel to pixel, so the check runs
+    # on smoothed copies.
+    big = max(ref_g.shape)
+    sm = lambda f: cv2.GaussianBlur(f, (0, 0), 0.004 * big)
+    fs_, bs_ = sm(flow), sm(back)
+    tau = 0.002 * big
+    e = np.sqrt(((fs_ + remap(bs_, fs_, cv2.INTER_LINEAR)) ** 2).sum(-1))
+    fb = cv2.GaussianBlur(np.clip(1 - (e - tau) / (2 * tau), 0, 1).astype(np.float32), (0, 0), tau)
     m = np.ones(ref_g.shape, np.float32) if mask is None else mask.astype(np.float32)
     # confidence: low where the blurred images still disagree after warping (occlusion / failure)
     warped_b = remap(b.astype(np.float32), flow)
@@ -302,6 +296,15 @@ def remap(img, flow, interp=cv2.INTER_LANCZOS4):
     gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
     return cv2.remap(img, gx + flow[..., 0], gy + flow[..., 1], interp,
                      borderMode=cv2.BORDER_REFLECT)
+
+
+def flow_ripple(flow):
+    """How fast a flow field changes from pixel to pixel (px per px, smoothed)."""
+    r = 0
+    for c in range(2):
+        f = cv2.GaussianBlur(flow[..., c], (0, 0), 2)
+        r = r + np.abs(cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=3, scale=0.125)) + np.abs(cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=3, scale=0.125))
+    return cv2.GaussianBlur(r, (0, 0), 6)
 
 
 def gate_flow(flow, ref_g, mov_g, gain=FLOW_GATE_GAIN if 'FLOW_GATE_GAIN' in globals() else 3.0):
@@ -387,6 +390,12 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
                 plain = ghost_map(cv2.GaussianBlur(tg, (0, 0), 6.0), cg)   # agreement of the plain line-up
                 flow, fb = dense_flow(tg, cg, fm_mask)
                 flow = gate_flow(flow, tg, cg)
+                # smoothness check on the flow that would be applied: real parallax and body
+                # shifts change gently; flow that ripples (locked onto different cells of a
+                # repeating mesh from place to place) bends straight threads into waves
+                smooth_ok = cv2.GaussianBlur(np.clip(1 - (flow_ripple(flow) - 0.08) / 0.12, 0, 1).astype(np.float32), (0, 0), 4)
+                flow = flow * smooth_ok[..., None]
+                fb = fb * smooth_ok
                 cand = remap(warped[cur], flow)
                 # the warp is decided pixel by pixel (two-way check, gate); as a last
                 # check it must not make whole-frame agreement worse
