@@ -158,26 +158,64 @@ def order_frames(grays):
 
 
 # ---------- 3. global alignment ----------
-def homography(src_g, dst_g, mask_src, mask_dst):
-    """H mapping src -> dst coordinates."""
+_FEATS = {}
+
+
+def features(g, mask, key=None):
+    """SIFT features of one photo, found once per photo when a key is given."""
+    if key is not None and key in _FEATS:
+        return _FEATS[key]
     sift = cv2.SIFT_create(nfeatures=6000, contrastThreshold=0.01)
-    u8 = lambda g: (np.clip(g, 0, 1) * 255).astype(np.uint8)
-    k1, d1 = sift.detectAndCompute(u8(src_g), mask_src)
-    k2, d2 = sift.detectAndCompute(u8(dst_g), mask_dst)
-    if d1 is None or d2 is None or len(k1) < 20 or len(k2) < 20:
+    k, d = sift.detectAndCompute((np.clip(g, 0, 1) * 255).astype(np.uint8), mask)
+    f = (np.float32([p.pt for p in k]).reshape(-1, 2), d)
+    if key is not None:
+        _FEATS[key] = f
+    return f
+
+
+def homography(src_g, dst_g, mask_src, mask_dst, k_src=None, k_dst=None):
+    """H mapping src -> dst coordinates. Sets homography.pairs (the inlier matches,
+    for checking the fine-tune) and homography.rough (True when only a rough
+    turn-shift-zoom was found: a photo framed far from the rest)."""
+    homography.pairs, homography.rough = None, False
+    (q1, d1), (q2, d2) = features(src_g, mask_src, k_src), features(dst_g, mask_dst, k_dst)
+    if d1 is None or d2 is None or len(q1) < 20 or len(q2) < 20:
         return np.eye(3, dtype=np.float32), 0
     m = cv2.BFMatcher(cv2.NORM_L2).knnMatch(d1, d2, k=2)
-    good = [a for a, b in (x for x in m if len(x) == 2) if a.distance < 0.75 * b.distance]
+    pairs2 = [x for x in m if len(x) == 2]
+    good = [a for a, b in pairs2 if a.distance < 0.75 * b.distance]
+    loose = [a for a, b in pairs2 if a.distance < 0.9 * b.distance]   # for the rough fallback
     if len(good) < 20:
         return np.eye(3, dtype=np.float32), len(good)
-    p1 = np.float32([k1[g.queryIdx].pt for g in good])
-    p2 = np.float32([k2[g.trainIdx].pt for g in good])
+    p1 = q1[[g.queryIdx for g in good]]
+    p2 = q2[[g.trainIdx for g in good]]
     H, inl = cv2.findHomography(p1, p2, cv2.USAC_MAGSAC, 3.0, maxIters=5000, confidence=0.999)
+    n = int(inl.sum()) if H is not None else 0
+    if n < 40:
+        # A photo framed far from the rest (turned, zoomed, shot from a step to the side)
+        # with a 3D subject: few matches fit one exact plane. Find the rough
+        # turn-shift-zoom, which tolerates parallax, and let the fine-tune decide.
+        thr = 8 * min(1.0, 1600 / max(src_g.shape)) + 1
+        thr /= min(1.0, 1600 / max(src_g.shape))
+        # the looser ratio test keeps more true matches on fine, similar-looking detail
+        # (fungal strands, setae); the turn-shift-zoom consensus sorts them out
+        p1 = q1[[g.queryIdx for g in loose]]
+        p2 = q2[[g.trainIdx for g in loose]]
+        A, ia = cv2.estimateAffinePartial2D(p1, p2, method=cv2.RANSAC, ransacReprojThreshold=thr, maxIters=5000, confidence=0.999)
+        k = ia.ravel() > 0 if A is not None else None
+        if k is not None and k.sum() >= 12 and k.sum() > n:
+            Hl, il = cv2.findHomography(p1[k], p2[k], cv2.RANSAC, thr) if k.sum() >= 16 else (None, None)
+            if Hl is not None and il.sum() >= 0.7 * k.sum():
+                H, keep = Hl, np.flatnonzero(k)[il.ravel() > 0]
+            else:
+                H, keep = np.vstack([A, [0, 0, 1]]), np.flatnonzero(k)
+            homography.pairs, homography.rough = (p1[keep], p2[keep]), True
+            return H.astype(np.float32), len(keep)
     if H is None:
         return np.eye(3, dtype=np.float32), 0
     m = inl.ravel() > 0
-    homography.pairs = (p1[m], p2[m])        # the inlier matches, for checking the fine-tune
-    return H.astype(np.float32), int(inl.sum())
+    homography.pairs = (p1[m], p2[m])
+    return H.astype(np.float32), n
 
 
 def pair_error(H, pairs):
@@ -221,7 +259,7 @@ def repeat_score(gray):
 REPEAT = 0.4    # repeat score above this: a mesh-like pattern is in view
 
 
-def ecc_refine(src_g, dst_g, H, mask, scale=0.5, pairs=None, repeating=False):
+def ecc_refine(src_g, dst_g, H, mask, scale=0.5, pairs=None, repeating=False, rough=False):
     """Refine H with ECC on gradient magnitude (focus-insensitive-ish). The result must
     still agree with the matched features. With repeating texture in view (an insect
     screen) ECC locks onto whichever cells are nearest and shears the background, and
@@ -229,26 +267,42 @@ def ecc_refine(src_g, dst_g, H, mask, scale=0.5, pairs=None, repeating=False):
     features' line-up is kept and the flow does the rest."""
     if repeating:
         return H, False
-    def grad(g):
-        g = cv2.GaussianBlur(g, (0, 0), 2.0)
-        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0); gy = cv2.Sobel(g, cv2.CV_32F, 0, 1)
-        return cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), 2.0)
-    s = cv2.resize(grad(src_g), None, fx=scale, fy=scale)
-    d = cv2.resize(grad(dst_g), None, fx=scale, fy=scale)
-    m = cv2.resize(mask, (d.shape[1], d.shape[0]), interpolation=cv2.INTER_NEAREST)
-    S = np.diag([scale, scale, 1]).astype(np.float32)
-    # ECC wants warp from template(dst) coords to input(src) coords
-    W = (S @ np.linalg.inv(H) @ np.linalg.inv(S)).astype(np.float32)
-    try:
-        _, W = cv2.findTransformECC(d, s, W, cv2.MOTION_HOMOGRAPHY,
-                                    (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6), m, 5)
+    big = max(src_g.shape)
+
+    def stage(H, scale, sigma, iters):
+        # shrink first, then gradients at that size (blur scaled to match)
+        sg = max(0.5, sigma * scale)
+        def grad(g):
+            g = cv2.GaussianBlur(cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), (0, 0), sg)
+            gx = cv2.Sobel(g, cv2.CV_32F, 1, 0); gy = cv2.Sobel(g, cv2.CV_32F, 0, 1)
+            return cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), sg)
+        s, d = grad(src_g), grad(dst_g)
+        m = cv2.resize(mask, (d.shape[1], d.shape[0]), interpolation=cv2.INTER_NEAREST)
+        S = np.diag([scale, scale, 1]).astype(np.float32)
+        # ECC wants warp from template(dst) coords to input(src) coords
+        W = (S @ np.linalg.inv(H) @ np.linalg.inv(S)).astype(np.float32)
+        try:
+            _, W = cv2.findTransformECC(d, s, W, cv2.MOTION_HOMOGRAPHY,
+                                        (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, iters, 1e-5), m, 5)
+        except cv2.error:
+            return None
         Hn = (np.linalg.inv(np.linalg.inv(S) @ W @ S)).astype(np.float32)
-    except cv2.error:
+        return Hn if np.isfinite(Hn).all() else None
+
+    if rough:
+        # a rough start: first line up the overall shapes, blurred enough that focus
+        # differences don't matter
+        c = stage(H, min(0.25, 500 / big), 0.006 * big, 100)
+        if c is None or pair_error(c, pairs) >= max(12, 0.012 * big):
+            return H, False
+        H = c
+    # half the working size first (most of the steps), then a few at the working size
+    h = stage(H, scale / 2, 2.0, 100)
+    Hn = stage(h if h is not None else H, scale, 2.0, 25)
+    if Hn is None:
         return H, False
     # the fine-tune must still agree with the matched features: on repeating texture (an
     # insect screen) it can lock onto the wrong cells and shear the whole photo
-    if not np.isfinite(Hn).all():
-        return H, False
     e0, e1 = pair_error(H, pairs), pair_error(Hn, pairs)
     if not e1 < max(4.0, 0.004 * max(src_g.shape), 2 * e0):
         return H, False
@@ -323,6 +377,7 @@ def gate_flow(flow, ref_g, mov_g, gain=FLOW_GATE_GAIN if 'FLOW_GATE_GAIN' in glo
 
 # ---------- full alignment ----------
 def align(imgs, local='chain', ref=None, log=print, avoid=()):
+    _FEATS.clear()
     n = len(imgs)
     grays = [to_gray(i) for i in imgs]
     masks = vignette_masks(grays)
@@ -348,20 +403,18 @@ def align(imgs, local='chain', ref=None, log=print, avoid=()):
         pos = ref_pos + direction
         while 0 <= pos < n:
             cur = order[pos]
-            homography.pairs = None
-            Hn, inl = homography(grays[cur], grays[prev], masks[cur], masks[prev])
-            H = Hs[prev] @ Hn
+            Hn, inl = homography(grays[cur], grays[prev], masks[cur], masks[prev], cur, prev)
+            H, rough = Hs[prev] @ Hn, homography.rough
             # the matched features in reference coordinates: the fine-tune must still agree with them
             pr = homography.pairs
             pairs = (pr[0], cv2.perspectiveTransform(pr[1].reshape(-1, 1, 2), Hs[prev]).reshape(-1, 2)) if pr is not None else None
-            homography.pairs = None
-            Hd, inl_direct = homography(grays[cur], grays[ref], masks[cur], masks[ref])
-            if inl_direct > 1.5 * inl:          # direct match clearly better
-                H = Hd
-                pairs = homography.pairs
-            H, ok = ecc_refine(grays[cur], grays[ref], H, masks[ref], pairs=pairs, repeating=repeating)
+            Hd, inl_direct = homography(grays[cur], grays[ref], masks[cur], masks[ref], cur, ref)
+            if inl_direct > 1.5 * inl or (rough and not homography.rough and inl_direct >= 20):   # direct match clearly better
+                H, pairs, rough = Hd, homography.pairs, homography.rough
+            H, ok = ecc_refine(grays[cur], grays[ref], H, masks[ref], pairs=pairs, repeating=repeating, rough=rough)
             Hs[cur] = H
-            log(f"  frame {cur + 1}: inliers neighbour={inl} direct={inl_direct} ecc={'ok' if ok else ('off' if repeating else 'fail')}")
+            log(f"  frame {cur + 1}: inliers neighbour={inl} direct={inl_direct} ecc={'ok' if ok else ('off' if repeating else 'fail')}"
+                + (" (framed well apart: lined up by its overall shape first)" if rough and ok else ""))
             prev, pos = cur, pos + direction
 
     warped, wmask = [None] * n, [None] * n
@@ -436,7 +489,7 @@ def ghost_weights(aligned, ref, sigma=6.0, tol=0.06):
 
 # ---------- 5b. photo selection ----------
 MOMENT_GAP = 2.0           # s between consecutive photos that starts a new "moment"
-SUBJECT_MOVED = 0.8        # subject agreement below this: moved (real bursts 0.96+)
+SUBJECT_MOVED = 0.65       # subject agreement below this: moved (real bursts 0.96+, a photo shot from a step to the side 0.76, weevil 0.38)
 SUBJECT_MOVED_APART = 0.95  # stricter for a photo from a different moment
 
 
