@@ -77,20 +77,22 @@
     const srcPx = frames.map(f => f.srcPixels || f.width * f.height);
     const Hs = new Array(n); Hs[ref] = eye3();
     const inl = new Array(n).fill(9999), eccOk = new Array(n).fill(true);
+    const feats = new Map();                          // each photo's features, found once
     let done = 0;
     for (const dir of [-1, 1]) {
       let prev = ref, pos = refPos + dir;
       while (pos >= 0 && pos < n) {
         const cur = order[pos];
-        const a = homography(cv, gray[cur], gray[prev], masks[cur], masks[prev]);
+        let a = homography(cv, gray[cur], gray[prev], masks[cur], masks[prev], feats, cur, prev);
         let Hm = mul3(Hs[prev], a.H), best = a.inliers;
         // the matched features, in reference coordinates: the fine-tune must still agree with them
         let pairs = { src: a.src || [], dst: (a.dst || []).map((v, j, D) => j % 2 ? null : applyH(Hs[prev], v, D[j + 1])).filter(Boolean).flat() };
         if (prev !== ref) {
-          const d = homography(cv, gray[cur], gray[ref], masks[cur], masks[ref]);
-          if (d.inliers > 1.5 * a.inliers) { Hm = d.H; best = d.inliers; pairs = { src: d.src || [], dst: d.dst || [] }; }
+          const d = homography(cv, gray[cur], gray[ref], masks[cur], masks[ref], feats, cur, ref);
+          if (d.inliers > 1.5 * a.inliers || (a.rough && !d.rough && d.inliers >= 20)) { Hm = d.H; best = d.inliers; pairs = { src: d.src || [], dst: d.dst || [] }; a = d; }
         }
-        const r = eccRefine(cv, gray[cur], gray[ref], Hm, masks[ref], pairs, repeating);
+        const r = eccRefine(cv, gray[cur], gray[ref], Hm, masks[ref], pairs, repeating, a.rough);
+        if (a.rough && r.ok) say(`photo ${cur + 1}: framed well apart from the others; lined up by its overall shape first`);
         Hs[cur] = r.H; inl[cur] = best; eccOk[cur] = r.ok || !!r.skipped;
         say(`photo ${cur + 1}: ${best} matches${r.skipped ? '' : `, fine-tune ${r.ok ? 'ok' : 'skipped'}`}`);
         prev = cur; pos += dir; done++;
@@ -98,6 +100,7 @@
         await tick();
       }
     }
+    feats.forEach(f => f.d.delete()); feats.clear();
     const warped = new Array(n), wmask = new Array(n);
     for (let i = 0; i < n; i++) {
       const M = cv.matFromArray(3, 3, cv.CV_64F, Hs[i]);
@@ -134,14 +137,15 @@
       const { flow, fb } = denseFlow(cv, wg[ref], wg[cur], both);
       gateFlow(cv, flow, wg[ref], wg[cur]);
       const share = movedShare(flow, both);
-      const candG = share > 0 ? remapMat(cv, wg[cur], flow, cv.INTER_LINEAR) : null;
+      const maps = share > 0 ? flowMaps(cv, flow) : null;          // built once, used for every remap below
+      const candG = maps ? remapWith(cv, wg[cur], maps, cv.INTER_LINEAR) : null;
       const nccG = bandNCC(cv, wg[ref], wg[cur], both), nccF = candG ? bandNCC(cv, wg[ref], candG, both) : -1;
       if (candG && nccF >= nccG + 0.002) {
-        const cand = remapMat(cv, warped[cur], flow, cv.INTER_LANCZOS4);
+        const cand = remapWith(cv, warped[cur], maps, cv.INTER_LANCZOS4);
         warped[cur].delete(); warped[cur] = cand;
         wg[cur].delete(); wg[cur] = candG;
         const mf = new cv.Mat(); wmask[cur].convertTo(mf, cv.CV_32F);
-        const mr = remapMat(cv, mf, flow, cv.INTER_LINEAR); mf.delete();
+        const mr = remapWith(cv, mf, maps, cv.INTER_LINEAR); mf.delete();
         const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY); mr.delete();
         wmask[cur].delete(); wmask[cur] = new cv.Mat(); mb.convertTo(wmask[cur], cv.CV_8U); mb.delete();
         say(`photo ${cur + 1}: local correction on ${Math.max(1, Math.round(share * 100))}% of it (${nccG.toFixed(3)} → ${nccF.toFixed(3)})`);
@@ -154,6 +158,7 @@
       for (let q = 0; q < T.length; q++) T[q] = Math.max(T[q], P[q]);
       trust[cur] = new cv.Mat(); fbH.convertTo(trust[cur], cv.CV_8U, 255, 0.5);   // 8-bit: phones are short of memory
       fbH.delete(); plain.delete();
+      if (maps) { maps[0].delete(); maps[1].delete(); }
       flow.delete(); both.delete(); done++;
       progress(0.45 + 0.2 * done / (n - 1), 'Correcting movement');
       await tick();
@@ -214,7 +219,9 @@
         const m = maskedMean(g.data32F, cover.data32F);
         const sm = subjectAgreement(cv, wg[ref], wg[i], g, cover);
         const gap = moment.apart[i];
-        if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
+        if (typeof process !== 'undefined' && process.env && process.env.SELDBG) console.log('SELDBG', i + 1, m.toFixed(3), sm.toFixed(3));
+        if (opts.keepAll) { /* test hook: judge nothing here */ }
+        else if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
         else if (sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
         else if (gap && sm < SUBJECT_MOVED_APART) { keep[i] = false; why[i] = `taken ${gapText(gap)} the others, and the subject had moved a little`; }
         else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others but lines up well, kept`);
@@ -282,7 +289,7 @@
   // ---------- photo-selection thresholds ----------
   const MOMENT_GAP = 2000;          // ms between consecutive photos that starts a new "moment"
   const WEAK_MATCH = 0.25;          // fewer than this share of the best photo's matches, and no fine-tune
-  const SUBJECT_MOVED = 0.8;        // subject agreement below this: moved (real bursts 0.96+, weevil 0.38)
+  const SUBJECT_MOVED = 0.65;       // subject agreement below this: moved (real bursts 0.96+, a photo shot from a step to the side 0.76, weevil 0.38)
   const SUBJECT_MOVED_APART = 0.95; // stricter for photos from a different moment
   const REPEAT = 0.4;               // repeat score above this: a mesh-like pattern is in view (mesh 0.7-1.4, others <= 0.17)
 
@@ -574,21 +581,31 @@
 
   function to8(cv, g) { const u = new cv.Mat(); g.convertTo(u, cv.CV_8U, 255); return u; }
 
-  function homography(cv, srcG, dstG, mSrc, mDst) {
-    // features on a downscaled copy (speed), H rescaled to full size
-    const s = Math.min(1, 1600 / Math.max(srcG.cols, srcG.rows));
-    const prep = (g, m) => {
-      const r = new cv.Mat(); cv.resize(g, r, new cv.Size(0, 0), s, s, cv.INTER_AREA);
-      const u = to8(cv, r); r.delete();
-      const mm = new cv.Mat(); cv.resize(m, mm, new cv.Size(u.cols, u.rows), 0, 0, cv.INTER_NEAREST);
-      return [u, mm];
-    };
-    const [a, ma] = prep(srcG, mSrc), [b, mb] = prep(dstG, mDst);
+  /** AKAZE features of one photo on a downscaled copy, found once and reused for
+      every pair the photo is matched in. */
+  function features(cv, cache, i, g, m) {
+    if (cache && cache.has(i)) return cache.get(i);
+    const s = Math.min(1, 1600 / Math.max(g.cols, g.rows));
+    const r = new cv.Mat(); cv.resize(g, r, new cv.Size(0, 0), s, s, cv.INTER_AREA);
+    const u = to8(cv, r); r.delete();
+    const mm = new cv.Mat(); cv.resize(m, mm, new cv.Size(u.cols, u.rows), 0, 0, cv.INTER_NEAREST);
     const ak = new cv.AKAZE(); ak.setThreshold(0.0005);
-    const k1 = new cv.KeyPointVector(), k2 = new cv.KeyPointVector(), d1 = new cv.Mat(), d2 = new cv.Mat();
-    ak.detectAndCompute(a, ma, k1, d1); ak.detectAndCompute(b, mb, k2, d2);
+    const kv = new cv.KeyPointVector(), d = new cv.Mat();
+    ak.detectAndCompute(u, mm, kv, d);
+    const pts = new Float32Array(kv.size() * 2);
+    for (let k = 0; k < kv.size(); k++) { const p = kv.get(k).pt; pts[2 * k] = p.x; pts[2 * k + 1] = p.y; }
+    kv.delete(); ak.delete(); u.delete(); mm.delete();
+    const f = { s, pts, d, n: pts.length / 2 };
+    if (cache) cache.set(i, f);
+    return f;
+  }
+
+  function homography(cv, srcG, dstG, mSrc, mDst, cache, iSrc, iDst) {
+    // features on a downscaled copy (speed), H rescaled to full size
+    const F1 = features(cv, cache, iSrc, srcG, mSrc), F2 = features(cv, cache, iDst, dstG, mDst);
+    const s = F1.s, d1 = F1.d, d2 = F2.d;
     let res = { H: eye3(), inliers: 0 };
-    if (k1.size() >= 20 && k2.size() >= 20) {
+    if (F1.n >= 20 && F2.n >= 20) {
       const bf = new cv.BFMatcher(cv.NORM_HAMMING, false); const mv = new cv.DMatchVectorVector();
       bf.knnMatch(d1, d2, mv, 2);
       const p1 = [], p2 = [];
@@ -597,29 +614,110 @@
         if (m.size() < 2) { m.delete(); continue; }
         const x = m.get(0), y = m.get(1);
         if (x.distance < 0.8 * y.distance) {
-          const q = k1.get(x.queryIdx).pt, t = k2.get(x.trainIdx).pt;
-          p1.push(q.x, q.y); p2.push(t.x, t.y);
+          p1.push(F1.pts[2 * x.queryIdx], F1.pts[2 * x.queryIdx + 1]); p2.push(F2.pts[2 * x.trainIdx], F2.pts[2 * x.trainIdx + 1]);
         }
         m.delete();
       }
       mv.delete(); bf.delete();
       if (p1.length / 2 >= 20) {
-        const P1 = cv.matFromArray(p1.length / 2, 1, cv.CV_32FC2, p1), P2 = cv.matFromArray(p2.length / 2, 1, cv.CV_32FC2, p2);
-        const inl = new cv.Mat();
-        const Hm = cv.findHomography(P1, P2, cv.RANSAC, 3.0 * s + 0.5, inl, 5000, 0.999);
-        if (Hm && !Hm.empty()) {
-          const h = Array.from(Hm.data64F);
+        const fit = (q1, q2, thr) => {
+          const P1 = cv.matFromArray(q1.length / 2, 1, cv.CV_32FC2, q1), P2 = cv.matFromArray(q2.length / 2, 1, cv.CV_32FC2, q2);
+          const inl = new cv.Mat();
+          const Hm = cv.findHomography(P1, P2, cv.RANSAC, thr, inl, 5000, 0.999);
+          let out = null;
+          if (Hm && !Hm.empty()) {
+            const src = [], dst = [], I = inl.data;
+            for (let i = 0; i < I.length; i++) if (I[i]) { src.push(q1[2 * i], q1[2 * i + 1]); dst.push(q2[2 * i], q2[2 * i + 1]); }
+            out = { h: Array.from(Hm.data64F), inliers: src.length / 2, src, dst };
+          }
+          if (Hm) Hm.delete(); inl.delete(); P1.delete(); P2.delete();
+          return out;
+        };
+        let best = fit(p1, p2, 3.0 * s + 0.5);
+        // A photo framed far from the rest (turned, zoomed, shot from a step to the side)
+        // with a 3D subject in it: few matches fit one exact plane, so the strict fit finds
+        // too few. Look for the rough turn-shift-zoom first, which tolerates parallax, then
+        // fit the plane to the matches that agree with it.
+        let rough = false;
+        if (!best || best.inliers < 40) {
+          const sim = similarityInliers(p1, p2, 8 * s + 1);
+          if (sim.keep.length >= 12 && (!best || sim.keep.length > best.inliers)) {
+            const q1 = [], q2 = [];
+            for (const i of sim.keep) { q1.push(p1[2 * i], p1[2 * i + 1]); q2.push(p2[2 * i], p2[2 * i + 1]); }
+            const loose = q1.length >= 16 ? fit(q1, q2, 8 * s + 1) : null;
+            const [A, B, tx, ty] = sim.model;
+            best = loose && loose.inliers >= 0.7 * sim.keep.length ? loose
+              : { h: [A, -B, tx, B, A, ty, 0, 0, 1], inliers: sim.keep.length, src: q1, dst: q2 };
+            rough = true;                                  // a starting point: fine-tuning decides
+          }
+        }
+        if (best) {
           // rescale: H_full = S^-1 H S
           const S = [s, 0, 0, 0, s, 0, 0, 0, 1], Si = [1 / s, 0, 0, 0, 1 / s, 0, 0, 0, 1];
-          const src = [], dst = [], I = inl.data;
-          for (let i = 0; i < I.length; i++) if (I[i]) { src.push(p1[2 * i] / s, p1[2 * i + 1] / s); dst.push(p2[2 * i] / s, p2[2 * i + 1] / s); }
-          res = { H: mul3(mul3(Si, h), S), inliers: cv.countNonZero(inl), src, dst };
+          res = { H: mul3(mul3(Si, best.h), S), inliers: best.inliers, src: best.src.map(v => v / s), dst: best.dst.map(v => v / s), rough };
         }
-        if (Hm) Hm.delete(); inl.delete(); P1.delete(); P2.delete();
       }
     }
-    [a, ma, b, mb, d1, d2].forEach(m => m.delete()); k1.delete(); k2.delete(); ak.delete();
+    if (!cache) { d1.delete(); d2.delete(); }
     return res;
+  }
+
+  /** RANSAC for a turn + shift + zoom (two matches fix one), then the indices of the
+      matches within thr of the best one. Tolerates the parallax a full homography
+      fit with a tight threshold rejects. */
+  function similarityInliers(p1, p2, thr) {
+    const n = p1.length / 2; if (n < 2) return [];
+    let seed = 12345; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const t2 = thr * thr; let bestN = 0, bestM = null;
+    const count = (a, b, tx, ty) => {
+      let c = 0;
+      for (let i = 0; i < n; i++) {
+        const x = p1[2 * i], y = p1[2 * i + 1];
+        const dx = a * x - b * y + tx - p2[2 * i], dy = b * x + a * y + ty - p2[2 * i + 1];
+        if (dx * dx + dy * dy < t2) c++;
+      }
+      return c;
+    };
+    for (let it = 0; it < 3000; it++) {
+      const i = Math.floor(rnd() * n), j = Math.floor(rnd() * n); if (i === j) continue;
+      const ux = p1[2 * j] - p1[2 * i], uy = p1[2 * j + 1] - p1[2 * i + 1];
+      const vx = p2[2 * j] - p2[2 * i], vy = p2[2 * j + 1] - p2[2 * i + 1];
+      const d = ux * ux + uy * uy; if (d < 100) continue;
+      const a = (ux * vx + uy * vy) / d, b = (ux * vy - uy * vx) / d;
+      const sc = Math.hypot(a, b); if (sc < 0.6 || sc > 1.7) continue;           // a lean-in, not a teleport
+      const tx = p2[2 * i] - (a * p1[2 * i] - b * p1[2 * i + 1]), ty = p2[2 * i + 1] - (b * p1[2 * i] + a * p1[2 * i + 1]);
+      const c = count(a, b, tx, ty);
+      if (c > bestN) { bestN = c; bestM = [a, b, tx, ty]; }
+    }
+    if (!bestM) return { keep: [], model: null };
+    // refit on the inliers (least squares), then collect them again
+    let [a, b, tx, ty] = bestM;
+    for (let pass = 0; pass < 2; pass++) {
+      const idx = [];
+      for (let i = 0; i < n; i++) {
+        const x = p1[2 * i], y = p1[2 * i + 1];
+        const dx = a * x - b * y + tx - p2[2 * i], dy = b * x + a * y + ty - p2[2 * i + 1];
+        if (dx * dx + dy * dy < t2) idx.push(i);
+      }
+      if (idx.length < 3) break;
+      let mx = 0, my = 0, nx = 0, ny = 0;
+      for (const i of idx) { mx += p1[2 * i]; my += p1[2 * i + 1]; nx += p2[2 * i]; ny += p2[2 * i + 1]; }
+      mx /= idx.length; my /= idx.length; nx /= idx.length; ny /= idx.length;
+      let sxx = 0, sab = 0, sba = 0;
+      for (const i of idx) {
+        const ux = p1[2 * i] - mx, uy = p1[2 * i + 1] - my, vx = p2[2 * i] - nx, vy = p2[2 * i + 1] - ny;
+        sxx += ux * ux + uy * uy; sab += ux * vx + uy * vy; sba += ux * vy - uy * vx;
+      }
+      if (sxx <= 0) break;
+      a = sab / sxx; b = sba / sxx; tx = nx - (a * mx - b * my); ty = ny - (b * mx + a * my);
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const x = p1[2 * i], y = p1[2 * i + 1];
+      const dx = a * x - b * y + tx - p2[2 * i], dy = b * x + a * y + ty - p2[2 * i + 1];
+      if (dx * dx + dy * dy < t2) out.push(i);
+    }
+    return { keep: out, model: [a, b, tx, ty] };
   }
 
   function gradMag(cv, g, sigma = 2) {
@@ -644,10 +742,20 @@
       whichever cells are nearest and shears the background while the subject's
       features stay put, and two photos fine-tuned that way end up a fraction of a
       cell apart; there the features' line-up is kept and the flow does the rest. */
-  function eccRefine(cv, srcG, dstG, H, mask, pairs, repeating) {
+  function eccRefine(cv, srcG, dstG, H, mask, pairs, repeating, rough) {
     if (repeating) return { H, ok: false, skipped: true };
     const big = Math.max(srcG.cols, srcG.rows);
-    const Hn = eccStage(cv, srcG, dstG, H, mask, Math.min(0.5, 1100 / big), 2);
+    if (rough) {
+      // a rough start (photo framed far from the rest): first line up the overall shapes,
+      // blurred enough that focus differences don't matter, then the usual fine-tune
+      const c = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 500 / big), 0.006 * big);
+      if (c && (!pairs || pairError(c, pairs) < Math.max(12, 0.012 * big))) H = c;
+      else return { H, ok: false };
+    }
+    // half size first (a quarter of the work per step, most of the steps), then a few
+    // steps at the working size; each stops once the change is under 1e-5
+    const half = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 550 / big), 2, 100);
+    const Hn = eccStage(cv, srcG, dstG, half || H, mask, Math.min(0.5, 1100 / big), 2, 25);
     if (!Hn) return { H, ok: false };
     const e0 = pairs ? pairError(H, pairs) : 0, e1 = pairs ? pairError(Hn, pairs) : 0;
     if (!(e1 < Math.max(4, 0.004 * big, 2 * e0))) return { H, ok: false };
@@ -686,18 +794,21 @@
     return best;
   }
 
-  function eccStage(cv, srcG, dstG, H, mask, scale, sigma) {
-    const s0 = gradMag(cv, srcG, sigma), d0 = gradMag(cv, dstG, sigma);
-    const s = new cv.Mat(), d = new cv.Mat(), m = new cv.Mat();
-    cv.resize(s0, s, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
-    cv.resize(d0, d, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
+  function eccStage(cv, srcG, dstG, H, mask, scale, sigma, iters = 100) {
+    // shrink first, then gradients at that size (blur scaled to match): same result, a
+    // fraction of the work
+    const s0 = new cv.Mat(), d0 = new cv.Mat(), m = new cv.Mat();
+    cv.resize(srcG, s0, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
+    cv.resize(dstG, d0, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
+    const sg = Math.max(0.5, sigma * scale);
+    const s = gradMag(cv, s0, sg), d = gradMag(cv, d0, sg);
     cv.resize(mask, m, new cv.Size(d.cols, d.rows), 0, 0, cv.INTER_NEAREST);
     s0.delete(); d0.delete();
     const S = [scale, 0, 0, 0, scale, 0, 0, 0, 1], Si = [1 / scale, 0, 0, 0, 1 / scale, 0, 0, 0, 1];
     const Wm = cv.matFromArray(3, 3, cv.CV_32F, mul3(mul3(S, inv3(H)), Si));
     let out = null;
     try {
-      cv.findTransformECC(d, s, Wm, cv.MOTION_HOMOGRAPHY, new cv.TermCriteria(3, 200, 1e-6), m, 5);
+      cv.findTransformECC(d, s, Wm, cv.MOTION_HOMOGRAPHY, new cv.TermCriteria(3, iters, 1e-5), m, 5);
       const Hn = inv3(mul3(mul3(Si, Array.from(Wm.data32F)), S));
       if (Hn.every(isFinite)) out = Hn;
     } catch (e) { if (typeof process !== "undefined" && process.env.ECCDBG) console.log("ECC err", typeof e === "number" && cv.exceptionFromPtr ? cv.exceptionFromPtr(e).msg : e); }
@@ -719,7 +830,6 @@
     const fs = new cv.Mat(), bs = new cv.Mat();
     cv.calcOpticalFlowFarneback(a, b, fs, 0.5, 5, 21, 3, 7, 1.5, 0);   // reference -> photo
     cv.calcOpticalFlowFarneback(b, a, bs, 0.5, 5, 21, 3, 7, 1.5, 0);   // photo -> reference
-    a.delete(); b.delete();
     // two-way check: following the flow there and back should land where it started
     // (within ~1 px at this size). It fails at occlusions and on repeating texture.
     const bw = remapMat(cv, bs, fs, cv.INTER_LINEAR); bs.delete();
@@ -735,35 +845,35 @@
     const rip = flowRipple(cv, fs);
     for (let i = 0; i < FB.length; i++) FB[i] *= Math.min(1, Math.max(0, 1 - (rip[i] - 0.08) / 0.12));
     cv.GaussianBlur(fb, fb, new cv.Size(0, 0), 2, 2);
-    const flow = new cv.Mat(); cv.resize(fs, flow, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR); fs.delete();
-    const F = flow.data32F; for (let i = 0; i < F.length; i++) F[i] /= s;
-    const fbFull = new cv.Mat(); cv.resize(fb, fbFull, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR);
-    // confidence: agreement of blurred images after warping, where the two-way check passes
-    const rb = new cv.Mat(), mb = new cv.Mat();
-    cv.GaussianBlur(refG, rb, new cv.Size(0, 0), 2.5, 2.5); cv.GaussianBlur(movG, mb, new cv.Size(0, 0), 2.5, 2.5);
-    const wb = remapMat(cv, mb, flow, cv.INTER_LINEAR); mb.delete();
-    const conf = new cv.Mat(H, W, cv.CV_32F); const Cf = conf.data32F, R = rb.data32F, Wb = wb.data32F, Mk = mask.data, FBf = fbFull.data32F;
-    for (let i = 0; i < Cf.length; i++) Cf[i] = Mk[i] ? Math.exp(-Math.abs(Wb[i] - R[i]) * 255 / 12) * FBf[i] : 0;
-    rb.delete(); wb.delete();
-    const smooth = 4 * Math.max(W, H) / 2212;
+    // confidence: agreement of the blurred images after warping, where the two-way check
+    // passes; the flow is smoothed by it (normalised convolution). All at the working size,
+    // then brought up to full size once.
+    const w = fs.cols, h = fs.rows;
+    const af = new cv.Mat(), bf = new cv.Mat(); a.convertTo(af, cv.CV_32F); b.convertTo(bf, cv.CV_32F);
+    a.delete(); b.delete();
+    const wb = remapMat(cv, bf, fs, cv.INTER_LINEAR); bf.delete();
+    const ms = new cv.Mat(); cv.resize(mask, ms, new cv.Size(w, h), 0, 0, cv.INTER_NEAREST);
+    const conf = new cv.Mat(h, w, cv.CV_32F); const Cf = conf.data32F, R = af.data32F, Wb = wb.data32F, Mk = ms.data, FBs = fb.data32F;
+    for (let i = 0; i < Cf.length; i++) Cf[i] = Mk[i] ? Math.exp(-Math.abs(Wb[i] - R[i]) / 12) * FBs[i] : 0;
+    af.delete(); wb.delete(); ms.delete();
+    const smooth = 4 * s * Math.max(W, H) / 2212;
     const den = new cv.Mat(); cv.GaussianBlur(conf, den, new cv.Size(0, 0), smooth, smooth);
-    const ch = new cv.MatVector(); cv.split(flow, ch);
+    const ch = new cv.MatVector(); cv.split(fs, ch);
     for (let c = 0; c < 2; c++) {
       const x = ch.get(c); cv.multiply(x, conf, x);
       cv.GaussianBlur(x, x, new cv.Size(0, 0), smooth, smooth);
       const X = x.data32F, D = den.data32F;
-      for (let i = 0; i < X.length; i++) X[i] /= (D[i] + 1e-4);
+      for (let i = 0; i < X.length; i++) X[i] = X[i] / (D[i] + 1e-4) * FBs[i];   // where the two-way check fails, keep the plain line-up
       ch.set(c, x); x.delete();
     }
-    cv.merge(ch, flow); ch.delete(); conf.delete(); den.delete();
-    const maxPx = 0.04 * Math.max(W, H), F2 = flow.data32F, FBu = fbFull.data32F;
-    for (let i = 0, k = 0; i < F2.length; i += 2, k++) {
-      // where the two-way check fails, keep the plain line-up
-      F2[i] *= FBu[k]; F2[i + 1] *= FBu[k];
+    cv.merge(ch, fs); ch.delete(); conf.delete(); den.delete();
+    const flow = new cv.Mat(); cv.resize(fs, flow, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR); fs.delete();
+    const maxPx = 0.04 * Math.max(W, H), F2 = flow.data32F;
+    for (let i = 0; i < F2.length; i += 2) {
+      F2[i] /= s; F2[i + 1] /= s;
       const m = Math.hypot(F2[i], F2[i + 1]);
       if (m > maxPx) { F2[i] *= maxPx / m; F2[i + 1] *= maxPx / m; }
     }
-    fbFull.delete();
     return { flow, fb };
   }
 
@@ -786,18 +896,38 @@
   }
 
   function gateFlow(cv, flow, refG, movG) {
-    const b = g => { const o = new cv.Mat(); cv.GaussianBlur(g, o, new cv.Size(0, 0), 3, 3); return o; };
-    const r = b(refG), m = b(movG), wm0 = remapMat(cv, movG, flow, cv.INTER_LINEAR), wm = b(wm0); wm0.delete();
+    // worked out at the flow's own working size (the gate is smooth); applied at full size
+    const W = refG.cols, H = refG.rows, k = Math.min(1, 1100 / Math.max(W, H));
+    const w = Math.round(W * k), h = Math.round(H * k);
+    const shrink = g => { const o = new cv.Mat(); cv.resize(g, o, new cv.Size(w, h), 0, 0, cv.INTER_AREA); return o; };
+    const rs = shrink(refG), ms = shrink(movG);
+    const fs = new cv.Mat(); cv.resize(flow, fs, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+    const FS = fs.data32F; for (let i = 0; i < FS.length; i++) FS[i] *= k;
+    const b = g => { const o = new cv.Mat(); cv.GaussianBlur(g, o, new cv.Size(0, 0), 3 * k, 3 * k); return o; };
+    const r = b(rs), m = b(ms), wm0 = remapMat(cv, ms, fs, cv.INTER_LINEAR), wm = b(wm0); wm0.delete();
     const eg = new cv.Mat(), ef = new cv.Mat();
     cv.absdiff(m, r, eg); cv.absdiff(wm, r, ef);
-    const sg = 15 * Math.max(refG.cols, refG.rows) / 2212;
+    const sg = 15 * k * Math.max(W, H) / 2212;
     cv.GaussianBlur(eg, eg, new cv.Size(0, 0), sg, sg); cv.GaussianBlur(ef, ef, new cv.Size(0, 0), sg, sg);
     const A = new cv.Mat(eg.rows, eg.cols, cv.CV_32F), a = A.data32F, G = eg.data32F, Fv = ef.data32F;
     for (let i = 0; i < a.length; i++) a[i] = Math.min(1, Math.max(0, (G[i] - Fv[i] - 0.002) / (G[i] + 0.01) * 3));
     cv.GaussianBlur(A, A, new cv.Size(0, 0), sg, sg);
-    const F = flow.data32F;
-    for (let i = 0; i < a.length; i++) { F[2 * i] *= a[i]; F[2 * i + 1] *= a[i]; }
-    [r, m, wm, eg, ef, A].forEach(x => x.delete());
+    const Af = new cv.Mat(); cv.resize(A, Af, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR);
+    const F = flow.data32F, af = Af.data32F;
+    for (let i = 0; i < af.length; i++) { F[2 * i] *= af[i]; F[2 * i + 1] *= af[i]; }
+    [rs, ms, fs, r, m, wm, eg, ef, A, Af].forEach(x => x.delete());
+  }
+
+  function flowMaps(cv, flow) {
+    const H = flow.rows, W = flow.cols;
+    const mx = new cv.Mat(H, W, cv.CV_32F), my = new cv.Mat(H, W, cv.CV_32F);
+    const X = mx.data32F, Y = my.data32F, F = flow.data32F;
+    for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++) { X[i] = x + F[2 * i]; Y[i] = y + F[2 * i + 1]; }
+    return [mx, my];
+  }
+  function remapWith(cv, src, maps, interp) {
+    const out = new cv.Mat(); cv.remap(src, out, maps[0], maps[1], interp, cv.BORDER_REFLECT);
+    return out;
   }
 
   function remapMat(cv, src, flow, interp) {
@@ -811,18 +941,24 @@
   }
 
   function bandNCC(cv, a, b, mask) {
+    // at half size for big photos (the band is 2-10 px at full size, 1-5 at half: same band)
+    const f = a.cols > 1200 ? 0.5 : 1;
+    const small = (m, interp) => { if (f === 1) return m; const o = new cv.Mat(); cv.resize(m, o, new cv.Size(Math.round(m.cols * f), Math.round(m.rows * f)), 0, 0, interp); return o; };
+    const a2 = small(a, cv.INTER_AREA), b2 = small(b, cv.INTER_AREA), m2 = small(mask, cv.INTER_NEAREST);
     const band = g => {
       const x = new cv.Mat(), y = new cv.Mat();
-      cv.GaussianBlur(g, x, new cv.Size(0, 0), 2, 2); cv.GaussianBlur(g, y, new cv.Size(0, 0), 10, 10);
+      cv.GaussianBlur(g, x, new cv.Size(0, 0), 2 * f, 2 * f); cv.GaussianBlur(g, y, new cv.Size(0, 0), 10 * f, 10 * f);
       cv.subtract(x, y, x); y.delete(); return x;
     };
-    const A = band(a), B = band(b), M = mask.data, p = A.data32F, q = B.data32F;
+    const A = band(a2), B = band(b2), M = m2.data, p = A.data32F, q = B.data32F;
     let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-    for (let i = 0; i < p.length; i += 3) {             // subsample for speed
+    const step = f === 1 ? 3 : 1;                         // subsample for speed
+    for (let i = 0; i < p.length; i += step) {
       if (!M[i]) continue;
       const u = p[i], v = q[i]; n++; sa += u; sb += v; saa += u * u; sbb += v * v; sab += u * v;
     }
     A.delete(); B.delete();
+    if (f !== 1) { a2.delete(); b2.delete(); m2.delete(); }
     if (n < 10) return 0;
     const cov = sab / n - (sa / n) * (sb / n), va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
     return cov / Math.sqrt(va * vb + 1e-12);
