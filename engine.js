@@ -219,7 +219,6 @@
         const m = maskedMean(g.data32F, cover.data32F);
         const sm = subjectAgreement(cv, wg[ref], wg[i], g, cover);
         const gap = moment.apart[i];
-        if (typeof process !== 'undefined' && process.env && process.env.SELDBG) console.log('SELDBG', i + 1, m.toFixed(3), sm.toFixed(3));
         if (opts.keepAll) { /* test hook: judge nothing here */ }
         else if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
         else if (sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
@@ -608,11 +607,14 @@
     if (F1.n >= 20 && F2.n >= 20) {
       const bf = new cv.BFMatcher(cv.NORM_HAMMING, false); const mv = new cv.DMatchVectorVector();
       bf.knnMatch(d1, d2, mv, 2);
-      const p1 = [], p2 = [];
+      const p1 = [], p2 = [], w1 = [], w2 = [];       // w: looser ratio test, for the rough fallback
       for (let i = 0; i < mv.size(); i++) {
         const m = mv.get(i);
         if (m.size() < 2) { m.delete(); continue; }
         const x = m.get(0), y = m.get(1);
+        if (x.distance < 0.92 * y.distance) {
+          w1.push(F1.pts[2 * x.queryIdx], F1.pts[2 * x.queryIdx + 1]); w2.push(F2.pts[2 * x.trainIdx], F2.pts[2 * x.trainIdx + 1]);
+        }
         if (x.distance < 0.8 * y.distance) {
           p1.push(F1.pts[2 * x.queryIdx], F1.pts[2 * x.queryIdx + 1]); p2.push(F2.pts[2 * x.trainIdx], F2.pts[2 * x.trainIdx + 1]);
         }
@@ -640,10 +642,12 @@
         // fit the plane to the matches that agree with it.
         let rough = false;
         if (!best || best.inliers < 40) {
-          const sim = similarityInliers(p1, p2, 8 * s + 1);
+          // the looser ratio test keeps more true matches on fine, similar-looking detail
+          // (fungal strands, setae); the turn-shift-zoom consensus sorts them out
+          const sim = similarityInliers(w1, w2, 8 * s + 1);
           if (sim.keep.length >= 12 && (!best || sim.keep.length > best.inliers)) {
             const q1 = [], q2 = [];
-            for (const i of sim.keep) { q1.push(p1[2 * i], p1[2 * i + 1]); q2.push(p2[2 * i], p2[2 * i + 1]); }
+            for (const i of sim.keep) { q1.push(w1[2 * i], w1[2 * i + 1]); q2.push(w2[2 * i], w2[2 * i + 1]); }
             const loose = q1.length >= 16 ? fit(q1, q2, 8 * s + 1) : null;
             const [A, B, tx, ty] = sim.model;
             best = loose && loose.inliers >= 0.7 * sim.keep.length ? loose

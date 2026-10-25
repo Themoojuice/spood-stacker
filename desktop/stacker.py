@@ -182,7 +182,9 @@ def homography(src_g, dst_g, mask_src, mask_dst, k_src=None, k_dst=None):
     if d1 is None or d2 is None or len(q1) < 20 or len(q2) < 20:
         return np.eye(3, dtype=np.float32), 0
     m = cv2.BFMatcher(cv2.NORM_L2).knnMatch(d1, d2, k=2)
-    good = [a for a, b in (x for x in m if len(x) == 2) if a.distance < 0.75 * b.distance]
+    pairs2 = [x for x in m if len(x) == 2]
+    good = [a for a, b in pairs2 if a.distance < 0.75 * b.distance]
+    loose = [a for a, b in pairs2 if a.distance < 0.9 * b.distance]   # for the rough fallback
     if len(good) < 20:
         return np.eye(3, dtype=np.float32), len(good)
     p1 = q1[[g.queryIdx for g in good]]
@@ -195,6 +197,10 @@ def homography(src_g, dst_g, mask_src, mask_dst, k_src=None, k_dst=None):
         # turn-shift-zoom, which tolerates parallax, and let the fine-tune decide.
         thr = 8 * min(1.0, 1600 / max(src_g.shape)) + 1
         thr /= min(1.0, 1600 / max(src_g.shape))
+        # the looser ratio test keeps more true matches on fine, similar-looking detail
+        # (fungal strands, setae); the turn-shift-zoom consensus sorts them out
+        p1 = q1[[g.queryIdx for g in loose]]
+        p2 = q2[[g.trainIdx for g in loose]]
         A, ia = cv2.estimateAffinePartial2D(p1, p2, method=cv2.RANSAC, ransacReprojThreshold=thr, maxIters=5000, confidence=0.999)
         k = ia.ravel() > 0 if A is not None else None
         if k is not None and k.sum() >= 12 and k.sum() > n:
