@@ -3,8 +3,9 @@
 Salticid stacker: handheld lean-in focus stacking for phone macro bursts.
 
 Pipeline
-  1. load + vignette mask (the dark clamp/lens-barrel edge: dark at the frame
-     edge, nearly black, and in the same place in most photos)
+  1. load + vignette mask (the clamp/lens-barrel edge: near-black at the frame edge
+     in almost every photo, and the outside of one circle or ellipse round the frame;
+     a black night background is not taken for it)
   2. order frames by focus similarity (no reliance on filenames/EXIF)
   3. global alignment: SIFT + RANSAC homography to a mid-stack reference,
      refined with ECC (enhanced correlation coefficient)
@@ -57,38 +58,83 @@ def guided_filter(I, p, r, eps):
     return cv2.boxFilter(a, -1, k) * I + cv2.boxFilter(b, -1, k)
 
 
-def vignette_masks(grays, thresh=0.12):
-    """Where each photo has usable pixels (1) vs the black clamp edge of a
-    clip-on lens (0). A dark region touching the frame edge is the clamp only if
-    it is nearly black inside and, with enough photos, sits in the same place in
-    most of them: the clamp moves with the camera, a dark subject (a black
-    caterpillar crossing the frame edge) does not."""
+def clamp_model(grays, thresh=0.12):
+    """Fits the rim of a clip-on lens's black clamp, at ~200 px wide. Candidates are
+    near-black regions touching the frame edge; the clamp is accepted only if the ones
+    present in (almost) every photo are matched by the outside of one circle or
+    frame-shaped ellipse, with lit scene just inside its rim, and the rim is out near
+    the frame edge. A black night background or a dark subject crossing the frame edge
+    follows the subject's outline instead. Returns (cx, cy, asp, R) at full size, or None."""
     n = len(grays); h, w = grays[0].shape
-    q = 4; qw, qh = max(8, round(w / q)), max(8, round(h / q))
-    labs, vals, edges = [], [], []
-    frac = np.zeros((qh, qw), np.float32)
+    f = min(1.0, 200 / max(h, w)); qw, qh = max(8, round(w * f)), max(8, round(h * f))
+    cnt = np.zeros((qh, qw), np.int32)
     for g in grays:
         s = cv2.resize(g, (qw, qh), interpolation=cv2.INTER_AREA)
-        dark = (cv2.GaussianBlur(s, (0, 0), 15 / q) <= thresh).astype(np.uint8)
+        dark = (cv2.GaussianBlur(s, (0, 0), 15 * f) <= thresh).astype(np.uint8)
         nl, lab = cv2.connectedComponents(dark)
         edge = np.zeros(nl, bool)
         edge[np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))] = True
         edge[0] = False
-        frac += edge[lab] / n
-        labs.append(lab); vals.append(s); edges.append(edge)
-    out = []
-    for lab, s, edge in zip(labs, vals, edges):
-        clamp = np.zeros(len(edge), bool)
+        black = np.zeros(nl, bool)
         for c in np.nonzero(edge)[0]:
-            m = lab == c
-            med, steady = float(np.median(s[m])), float(frac[m].mean())
-            clamp[c] = med < 0.035 or (med < 0.06 and (n < 4 or steady >= 0.6))
-            if n >= 4 and steady < 0.6:
-                clamp[c] = False
-        m = cv2.resize((~clamp[lab]).astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        r = max(31, round(0.025 * max(h, w))) | 1        # keep clear of the clamp's soft edge
-        out.append(cv2.erode(m, np.ones((r, r), np.uint8)))
-    return out
+            black[c] = np.median(s[lab == c]) < 0.06
+        cnt += black[lab]
+    D = cnt >= max(1, int(np.ceil(0.75 * n)))
+    A = int(D.sum()); N = qw * qh
+    if A < 0.003 * N:
+        return None
+    yy, xx = np.mgrid[0:qh, 0:qw].astype(np.float32) + 0.5
+    maxD = int(np.ceil(np.hypot(qw, qh * w / h))) + 2
+
+    def score(cx, cy, asp):
+        d = np.minimum(maxD - 1, np.hypot(xx - cx, (yy - cy) * asp).astype(np.int32))
+        tot = np.bincount(d.ravel(), minlength=maxD)[::-1].cumsum()[::-1]
+        drk = np.bincount(d.ravel(), weights=D.ravel().astype(np.float64), minlength=maxD)[::-1].cumsum()[::-1]
+        iou = drk[1:] / (tot[1:] + A - drk[1:])
+        r = int(np.argmax(iou)) + 1
+        return float(iou[r - 1]), r
+
+    best = None
+    for asp in (1.0, w / h):
+        for i in range(-4, 5):
+            for j in range(-4, 5):
+                cx, cy = qw / 2 + i * 0.05 * qw, qh / 2 + j * 0.05 * qh
+                iou, r = score(cx, cy, asp)
+                if best is None or iou > best[0]:
+                    best = (iou, r, cx, cy, asp)
+    iou, R, cx0, cy0, asp = best
+    for i in range(-4, 5):                                   # refine the centre
+        for j in range(-4, 5):
+            cx, cy = cx0 + i * 0.0125 * qw, cy0 + j * 0.0125 * qh
+            v, r = score(cx, cy, asp)
+            if v > best[0]:
+                best = (v, r, cx, cy, asp)
+    iou, R, cx, cy, asp = best
+    d = np.hypot(xx - cx, (yy - cy) * asp)
+    band = 0.04 * max(qw, qh)
+    inside = (d < R - 1) & (d >= R - 1 - band)
+    outside_band = (d >= R) & (d < R + band)
+    in_dark = D[inside].mean() if inside.any() else 0.0
+    out_dark = D[outside_band].mean() if outside_band.any() else 0.0
+    share = (d >= R).mean()
+    half_diag = np.hypot(qw / 2, qh / 2 * asp)
+    if iou >= 0.8 and out_dark >= 0.85 and in_dark <= 0.3 and share <= 0.4 and R >= 0.6 * half_diag:
+        return cx / f, cy / f, asp, R / f
+    return None
+
+
+def vignette_masks(grays, thresh=0.12):
+    """Where each photo has usable pixels (1) vs the black clamp edge of a clip-on lens
+    (0). The clamp is fixed to the phone, so it is the same in every photo."""
+    h, w = grays[0].shape
+    model = clamp_model(grays, thresh)
+    if model is None:
+        return [np.ones((h, w), np.uint8) for _ in grays]
+    cx, cy, asp, R = model
+    margin = 0.025 * max(h, w)                 # the clamp's edge is soft (out-of-focus lens barrel)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    m = (np.hypot(xx - cx, (yy - cy) * asp) < R - margin).astype(np.uint8)
+    return [m.copy() for _ in grays]
 
 
 def fill_uncovered(warped, wmask, ref):

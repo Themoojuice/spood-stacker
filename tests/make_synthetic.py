@@ -19,7 +19,7 @@ Writes, per burst:
 
     python tests/make_synthetic.py            # all scenes
     python tests/make_synthetic.py legs       # one scene
-    (scenes: bark, legs, still, moved, drift, dense, mesh, and dup = bark plus an edited duplicate)
+    (scenes: bark, legs, still, moved, drift, dense, night, mesh, and dup = bark plus an edited duplicate)
 """
 import io, math, os, sys
 import cv2
@@ -76,6 +76,17 @@ def mesh(rng):
     col = np.dstack([v * 0.95, v * 0.97, v * 1.0]).clip(0, 1)
     yy1 = np.linspace(0, 1, H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
     depth = 0.62 + 0.38 * (1 - yy1)
+    return Part(col.astype(np.float32), np.ones((H, W), np.float32), depth.astype(np.float32))
+
+
+def night(rng):
+    """Flash at night: near-black background (a little noise and a faint far twig)."""
+    v = 0.012 + 0.006 * fractal(rng, H, W, 4, 3)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    v = v + 0.05 * np.exp(-(((yy - 0.25 * H) - 0.15 * (xx - W / 2)) / 18.0) ** 2)
+    col = np.dstack([v, v, v * 1.1]).clip(0, 1)
+    yy1 = np.linspace(0, 1, H, dtype=np.float32)[:, None] * np.ones((1, W), np.float32)
+    depth = 0.75 + 0.25 * (1 - yy1)
     return Part(col.astype(np.float32), np.ones((H, W), np.float32), depth.astype(np.float32))
 
 
@@ -282,6 +293,9 @@ SCENES = {
     # at a phone's noise level in shade: what merging detail from several photos is for
     'dense': dict(n=16, f=(0.16, 0.66), lean=0.04, par=0.05, orient=1, seed=13, moved=None, noise=5.0,
                   legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # flash at night: black background all round the subject (must not be taken for the clamp)
+    'night': dict(n=7, f=(0.14, 0.62), lean=0.05, par=0.06, orient=1, seed=17, moved=None, bg='night', drift=60,
+                  legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
     # spider on an insect screen: repeating texture behind a subject with parallax
     'mesh': dict(n=8, f=(0.14, 0.66), lean=0.05, par=0.07, orient=1, seed=5, moved=None, bg='mesh',
                  legs=[(0.30, 0.10), (0.35, 0.70), (0.30, 0.15), (0.40, 0.75),
@@ -292,7 +306,7 @@ SCENES = {
 def make(name):
     sc = SCENES[name]
     rng = np.random.default_rng(sc['seed'])
-    bg = mesh(rng) if sc.get('bg') == 'mesh' else bark(rng)
+    bg = mesh(rng) if sc.get('bg') == 'mesh' else night(rng) if sc.get('bg') == 'night' else bark(rng)
     base = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'])
     moved = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'],
                    shift=sc['moved']) if sc['moved'] else None

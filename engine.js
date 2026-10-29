@@ -55,6 +55,7 @@
 
     // ---------- 2. masks, order, reference ----------
     const masks = vignetteMasks(cv, gray);
+    if (opts.onDebug) opts.onDebug('masks', { width: W, height: H, masks: masks.map(m => Uint8Array.from(m.data)) });
     const order = orderFrames(cv, gray);
     const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
     const moment = moments(frames);
@@ -404,56 +405,111 @@
   }
 
   /** Where each photo has usable pixels (1) vs the black clamp edge of a clip-on
-      lens (0). A dark region touching the frame edge is the clamp only if it is
-      nearly black inside and, when there are enough photos, sits in the same place
-      in most of them: the clamp moves with the camera, a dark subject (a black
-      caterpillar crossing the frame edge) does not. */
+      lens (0). The clamp is fixed to the phone, so it sits in the same place in every
+      photo, and its inner edge is the rim of the lens: a circle (or an ellipse) round
+      the frame. Candidates are near-black regions touching the frame edge; the clamp is
+      accepted only if the ones present in (almost) every photo are matched by the
+      outside of one circle or ellipse, with lit scene just inside its rim. A black
+      night background, or a dark subject crossing the frame edge, follows the
+      subject's outline instead, and is kept. */
   function vignetteMasks(cv, grays) {
     const n = grays.length, W = grays[0].cols, H = grays[0].rows;
-    const q = 4, qw = Math.max(8, Math.round(W / q)), qh = Math.max(8, Math.round(H / q)), N = qw * qh;
-    const labs = [], vals = [], edges = [];
-    const frac = new Float32Array(N);
+    const all = () => grays.map(() => new cv.Mat(H, W, cv.CV_8U, new cv.Scalar(1)));
+    const model = clampModel(cv, grays);
+    if (!model) return all();
+    // the clamp's edge is soft (an out-of-focus lens barrel): keep 2.5% of the frame clear of it
+    const { cx, cy, asp, R } = model, margin = 0.025 * Math.max(W, H);
+    const m = new cv.Mat(H, W, cv.CV_8U), M = m.data, R2 = (R - margin) * (R - margin);
+    for (let y = 0, k = 0; y < H; y++) {
+      const dy = (y - cy) * asp;
+      for (let x = 0; x < W; x++, k++) { const dx = x - cx; M[k] = dx * dx + dy * dy < R2 ? 1 : 0; }
+    }
+    const out = [m];
+    for (let i = 1; i < n; i++) out.push(m.clone());
+    return out;
+  }
+
+  /** Fits the clamp's rim, at about 200 px wide. Returns {cx, cy, asp, R} in full-size
+      pixels (outside the rim is clamp; asp stretches y: 1 = circle, W/H = an ellipse
+      shaped like the frame), or null when there is no clamp. */
+  function clampModel(cv, grays) {
+    const n = grays.length, W = grays[0].cols, H = grays[0].rows;
+    const f = Math.min(1, 200 / Math.max(W, H)), qw = Math.max(8, Math.round(W * f)), qh = Math.max(8, Math.round(H * f)), N = qw * qh;
+    const cnt = new Uint8Array(N);
     for (const g of grays) {
       const s = new cv.Mat(); cv.resize(g, s, new cv.Size(qw, qh), 0, 0, cv.INTER_AREA);
-      const b = new cv.Mat(); cv.GaussianBlur(s, b, new cv.Size(0, 0), 15 / q, 15 / q);
+      const b = new cv.Mat(); cv.GaussianBlur(s, b, new cv.Size(0, 0), 15 * f, 15 * f);
       const dark = new cv.Mat(); cv.threshold(b, dark, 0.12, 1, cv.THRESH_BINARY_INV); b.delete();
       const d8 = new cv.Mat(); dark.convertTo(d8, cv.CV_8U); dark.delete();
       const lab = new cv.Mat(); const nl = cv.connectedComponents(d8, lab); d8.delete();
-      const L = Int32Array.from(lab.data32S); lab.delete();
+      const L = lab.data32S, V = s.data32F;
       const edge = new Uint8Array(nl);
       for (let x = 0; x < qw; x++) { edge[L[x]] = 1; edge[L[(qh - 1) * qw + x]] = 1; }
       for (let y = 0; y < qh; y++) { edge[L[y * qw]] = 1; edge[L[y * qw + qw - 1]] = 1; }
       edge[0] = 0;
-      for (let k = 0; k < N; k++) if (edge[L[k]]) frac[k] += 1 / n;
-      labs.push(L); vals.push(Float32Array.from(s.data32F)); edges.push(edge); s.delete();
+      // near-black regions only (median brightness under 0.06)
+      const vals = new Map();
+      for (let k = 0; k < N; k++) { const c = L[k]; if (!edge[c]) continue; let v = vals.get(c); if (!v) vals.set(c, v = []); v.push(V[k]); }
+      const black = new Uint8Array(nl);
+      for (const [c, v] of vals) { v.sort((p, q) => p - q); black[c] = v[v.length >> 1] < 0.06 ? 1 : 0; }
+      for (let k = 0; k < N; k++) if (black[L[k]]) cnt[k]++;
+      lab.delete(); s.delete();
     }
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      const L = labs[i], V = vals[i], edge = edges[i];
-      // per edge-touching dark region: its median brightness and how consistently it is there
-      const bins = new Map();
-      for (let k = 0; k < N; k++) {
-        const c = L[k]; if (!edge[c]) continue;
-        let r = bins.get(c); if (!r) { r = { v: [], f: 0, a: 0 }; bins.set(c, r); }
-        if (r.a % 3 === 0) r.v.push(V[k]);
-        r.f += frac[k]; r.a++;
+    const need = Math.max(1, Math.ceil(0.75 * n)), D = new Uint8Array(N);
+    let A = 0;
+    for (let k = 0; k < N; k++) if (cnt[k] >= need) { D[k] = 1; A++; }
+    if (A < 0.003 * N) return null;
+    // best rim: the outside of a circle or frame-shaped ellipse that matches D (IoU)
+    const maxD = Math.ceil(Math.hypot(qw, qh * W / H)) + 2;
+    const tot = new Float64Array(maxD), drk = new Float64Array(maxD);
+    const score = (cx, cy, asp) => {
+      tot.fill(0); drk.fill(0);
+      for (let y = 0, k = 0; y < qh; y++) {
+        const dy = (y + 0.5 - cy) * asp;
+        for (let x = 0; x < qw; x++, k++) {
+          const b = Math.min(maxD - 1, Math.floor(Math.hypot(x + 0.5 - cx, dy)));
+          tot[b]++; if (D[k]) drk[b]++;
+        }
       }
-      const isClamp = new Uint8Array(edge.length);
-      for (const [c, r] of bins) {
-        r.v.sort((x, y) => x - y);
-        const med = r.v[r.v.length >> 1], steady = r.f / r.a;
-        isClamp[c] = (med < 0.035 || (med < 0.06 && (n < 4 || steady >= 0.6))) ? 1 : 0;
-        if (n >= 4 && steady < 0.6) isClamp[c] = 0;
+      let ot = 0, od = 0, best = { iou: 0, R: maxD };
+      for (let r = maxD - 1; r > 0; r--) {
+        ot += tot[r]; od += drk[r];
+        const iou = od / (ot + A - od);
+        if (iou > best.iou) best = { iou, R: r };
       }
-      const mq = new cv.Mat(qh, qw, cv.CV_8U), M = mq.data;
-      for (let k = 0; k < N; k++) M[k] = isClamp[L[k]] ? 0 : 1;
-      const m = new cv.Mat(); cv.resize(mq, m, new cv.Size(W, H), 0, 0, cv.INTER_NEAREST); mq.delete();
-      // keep well clear of the clamp: its edge is soft (an out-of-focus lens barrel)
-      const r = Math.max(31, Math.round(0.025 * Math.max(W, H))) | 1;
-      const k = cv.Mat.ones(r, r, cv.CV_8U); cv.erode(m, m, k); k.delete();
-      out.push(m);
+      return best;
+    };
+    let best = { iou: 0 };
+    for (const asp of [1, W / H]) {
+      for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
+        const cx = qw / 2 + i * 0.05 * qw, cy = qh / 2 + j * 0.05 * qh, r = score(cx, cy, asp);
+        if (r.iou > best.iou) best = { iou: r.iou, R: r.R, cx, cy, asp };
+      }
     }
-    return out;
+    if (!best.cx) return null;
+    for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {          // refine the centre
+      const cx = best.cx + i * 0.0125 * qw, cy = best.cy + j * 0.0125 * qh, r = score(cx, cy, best.asp);
+      if (r.iou > best.iou) best = { iou: r.iou, R: r.R, cx, cy, asp: best.asp };
+    }
+    // the rim must be clean: lit scene just inside it, clamp just outside it
+    const band = 0.04 * Math.max(qw, qh);
+    let inN = 0, inD = 0, outN = 0, outD = 0, outside = 0;
+    for (let y = 0, k = 0; y < qh; y++) {
+      const dy = (y + 0.5 - best.cy) * best.asp;
+      for (let x = 0; x < qw; x++, k++) {
+        const d = Math.hypot(x + 0.5 - best.cx, dy);
+        if (d >= best.R) outside++;
+        if (d < best.R - 1 && d >= best.R - 1 - band) { inN++; inD += D[k]; }
+        else if (d >= best.R && d < best.R + band) { outN++; outD += D[k]; }
+      }
+    }
+    // and it must be out at the frame's edge: a rim tighter than 60% of the half-diagonal
+    // would be a round subject on a black background, not a lens
+    const halfDiag = Math.hypot(qw / 2, qh / 2 * best.asp);
+    const ok = best.iou >= 0.8 && outN > 0 && outD / outN >= 0.85 && (inN === 0 || inD / inN <= 0.3) &&
+      outside <= 0.4 * N && best.R >= 0.6 * halfDiag;
+    if (!ok) return null;
+    return { cx: best.cx / f, cy: best.cy / f, asp: best.asp, R: best.R / f, iou: best.iou };
   }
 
   /** Fills the part of each lined-up photo that lies outside its own pixels with
