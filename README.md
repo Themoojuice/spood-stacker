@@ -30,12 +30,13 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 6. The image is cropped to the area that at least one used photo saw (not just the area every photo saw), keeping roughly the photo's own shape, and lightly sharpened. The lined-up photos are kept, cropped and sharpened the same way, for the retouch brush.
 
 ### Memory and stack size
-With **Full detail** ticked (the default) the app stacks at the photos' own size, so a 12 MP burst comes out at about 12 MP. OpenCV.js keeps its work in one WebAssembly heap with a hard ceiling, however much memory the phone has, so the engine keeps that heap small instead:
+With **Full detail** ticked (the default) the app stacks at the photos' own size, so a 12 MP burst comes out at about 12 MP. OpenCV.js keeps its work in one WebAssembly heap with a hard ceiling, however much memory the phone has (raised from 1 GiB to 2 GiB in the copy the app ships), so the engine keeps that heap small instead:
 - The photos stay as files until the engine reaches each one; they are decoded in the background thread one at a time.
-- Lining up works on copies at most 1,600 px across; the big per-photo images (each lined-up photo, its grey copy and its coverage mask) wait outside the heap and are copied in only while being worked on.
+- Lining up works on copies at most 1,600 px across. The big per-photo images (each lined-up photo, its grey copy and its coverage mask) are parked outside the heap, in a scratch file in the app's private storage on the phone (OPFS), and read back only while being worked on. If that storage isn't available or fills up, they are kept in memory instead.
+- The merge works a strip of rows at a time, each with 256 rows of context above and below, cross-faded into the next; thresholds that must match across the frame are measured on the whole frame first. A strip comes out the same as the whole-frame merge to within 1/255.
 - Greys are 8-bit, the clamp mask is shared by all photos, and pyramid bands are built in place.
 
-Before starting, the engine estimates its peak memory from the number of photos and their size (`planSize` in `engine.js`, from measured peaks) and picks the largest working size that fits; if it had to shrink the stack, the result card says so. Running out of memory anyway still retries by itself at a smaller size. `node tools/memprobe.js` measures the heap per stage (see its header).
+Before starting, the engine estimates its peak memory from the number of photos and their size (`planSize` in `engine.js`, from measured peaks per stage), picks the strip height, and picks the largest working size that fits; if it had to shrink the stack, the result card says so. Running out of memory anyway still retries by itself at a smaller size. `node tools/memprobe.js` measures the heap per stage (see its header).
 
 ## Comparing engine versions
 Every change to `engine.js` should be checked against a known-good version on the same bursts, so a fix for one artefact can't quietly break another.
@@ -69,7 +70,7 @@ The synthetic scenes (`tests/make_synthetic.py`): `bark` (handheld lean-in with 
 - `retouch.js`: the retouch brush
 - `sw.js`: service worker (receives shared photos, works offline)
 - `manifest.webmanifest`: install and share-menu settings
-- `vendor/opencv-4.10.0.js`: OpenCV.js 4.10.0 (from `@techstark/opencv-js`, Apache 2.0)
+- `vendor/opencv-4.10.0-2g.js`: OpenCV.js 4.10.0 (from `@techstark/opencv-js`, Apache 2.0), with its memory ceiling raised from 1 GiB to 2 GiB by `tools/patch_cv.py`
 - `tools/`: the engine compare tool and the memory probe
 - `tests/`: synthetic bursts and app checks
 - `desktop/`: the laptop version

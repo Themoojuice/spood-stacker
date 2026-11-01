@@ -1,7 +1,7 @@
 /* Runs the stacking engine off the main thread so the screen stays responsive.
    The page hands over the photo files themselves; each is decoded here only when the
    engine reaches it, so a long burst never sits in memory as full-size pixels at once. */
-importScripts('vendor/opencv-4.10.0.js', 'exif.js', 'engine.js');
+importScripts('vendor/opencv-4.10.0-2g.js', 'exif.js', 'engine.js');
 
 const cvReady = new Promise(resolve => {
   const c = self.cv;
@@ -70,22 +70,81 @@ async function decode(file, w, h) {
   return d;
 }
 
+/** Where the engine parks its big per-photo images while it isn't using them: a scratch file
+    in the site's private storage on the phone (OPFS), read and written in place, so they cost
+    no RAM. Falls back to memory, image by image, if the file can't be used or fills up. */
+async function scratchStore() {
+  let root, name, ah;
+  try {
+    if (!(self.navigator && navigator.storage && navigator.storage.getDirectory)) return null;
+    root = await navigator.storage.getDirectory();
+    // a run that was cut short (app closed mid-stack) leaves its file behind
+    try { for await (const k of root.keys()) if (k.startsWith('spood-scratch-')) await root.removeEntry(k).catch(() => {}); } catch (e) { /* ignore */ }
+    name = 'spood-scratch-' + Date.now();
+    const fh = await root.getFileHandle(name, { create: true });
+    if (!fh.createSyncAccessHandle) return null;
+    ah = await fh.createSyncAccessHandle();
+  } catch (e) { return null; }
+  let end = 0, onDisk = 0, inMemory = 0;
+  const free = new Map();                                        // size -> offsets of dropped images
+  return {
+    put(u) {
+      const len = u.length, spare = free.get(len);
+      const at = spare && spare.length ? spare.pop() : end;
+      try {
+        if (ah.write(u, { at }) !== len) throw new Error('short write');
+        if (at === end) end += len;
+        onDisk += len;
+        return { at, len };
+      } catch (e) {
+        if (at !== end) spare.push(at);
+        inMemory += len;
+        return { mem: u, len };                                  // storage full: keep this one in memory
+      }
+    },
+    get(h, off = 0, len = h.len - off) {
+      if (h.mem) return h.mem.subarray(off, off + len);
+      const b = new Uint8Array(len);
+      if (ah.read(b, { at: h.at + off }) !== len) throw new Error('Could not read back a photo from scratch storage.');
+      return b;
+    },
+    set(h, off, u) {
+      if (h.mem) { if (u.buffer !== h.mem.buffer || u.byteOffset !== h.mem.byteOffset + off) h.mem.set(u, off); return; }
+      ah.write(u, { at: h.at + off });
+    },
+    drop(h) {
+      if (!h || h.dropped) return;
+      h.dropped = true;
+      if (h.mem) { h.mem = null; return; }
+      if (!free.has(h.len)) free.set(h.len, []);
+      free.get(h.len).push(h.at); onDisk -= h.len;
+    },
+    stats: () => ({ fileMiB: Math.round(end / 1048576), inMemoryMiB: Math.round(inMemory / 1048576) }),
+    async close() {
+      try { ah.truncate(0); ah.close(); } catch (e) { /* ignore */ }
+      try { await root.removeEntry(name); } catch (e) { /* ignore */ }
+    }
+  };
+}
+
 self.onmessage = async ev => {
   const cv = await cvReady;
   const { files, taken, opts } = ev.data;
+  const store = await scratchStore();
   try {
     const native = [];
     for (const f of files) native.push(await imageSize(f));
     // the largest working size whose memory need fits (the engine knows its own appetite)
     const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory });
     postMessage({ type: 'plan', plan });
+    postMessage({ type: 'log', m: store ? 'parking photos in scratch storage on the phone' : 'parking photos in memory' });
     const frames = files.map((file, i) => {
       const s = Math.min(1, plan.side / Math.max(native[i].width, native[i].height));
       const width = Math.max(1, Math.round(native[i].width * s)), height = Math.max(1, Math.round(native[i].height * s));
       return { width, height, srcPixels: native[i].width * native[i].height, taken: taken[i], read: () => decode(file, width, height) };
     });
     const out = await self.SalticidStacker.stackFrames(cv, frames, Object.assign({}, opts, {
-      maxSide: plan.side,
+      maxSide: plan.side, stripRows: plan.stripRows, store: store || undefined,
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),
       onSelection: sel => postMessage({ type: 'selection', sel }),
@@ -99,8 +158,11 @@ self.onmessage = async ev => {
           width: f.width, height: f.height, blob, focus: f.focus } }, [f.focus.data.buffer]);
       } : null
     }));
+    if (store) { const st = store.stats(); postMessage({ type: 'log', m: `scratch storage used: ${st.fileMiB} MB` + (st.inMemoryMiB ? ` (+${st.inMemoryMiB} MB kept in memory)` : '') }); }
     postMessage({ type: 'done', out }, [out.data.buffer]);
   } catch (e) {
     postMessage({ type: 'error', message: errText(cv, e) });
+  } finally {
+    if (store) await store.close();
   }
 };

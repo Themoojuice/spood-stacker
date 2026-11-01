@@ -6,7 +6,7 @@
    --strips N    merge in strips of N rows
    Writes <prefix>.png (unless it failed) and <prefix>.json: heap high-water per stage, time, log, error.
    The stock OpenCV.js grows its heap in big steps; for the true peak use an exact-growth build:
-     python3 tools/patch_cv.py vendor/opencv-4.10.0.js /tmp/opencv-measure.js 2047 exact */
+     python3 tools/patch_cv.py vendor/opencv-4.10.0-2g.js /tmp/opencv-measure.js 2047 exact */
 'use strict';
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const TOOLS = __dirname;
