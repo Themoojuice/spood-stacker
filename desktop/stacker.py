@@ -17,8 +17,9 @@ Pipeline
   5. ghost mask: down-weight a frame wherever it still disagrees with
      the reference at low frequency (spider moved, flow failed)
   5b. photo selection: leave out a photo whose subject moved (judged where
-     the photos are sharp, not over the whole frame), more strictly for a
-     photo taken more than 2 s apart from the rest (another burst)
+     the photos are sharp, not over the whole frame); a photo taken more than
+     2 s apart from the rest (another burst) is judged the same way and is
+     never the reference
   6. fusion: 'pmax' (pyramid max), 'dmap' (depth map), 'wpyr'
      (weighted pyramid), 'hybrid' (weighted pyramid at coarse levels; at fine
      levels where the stack is confidently textured, the detail of every photo
@@ -536,7 +537,6 @@ def ghost_weights(aligned, ref, sigma=6.0, tol=0.06):
 # ---------- 5b. photo selection ----------
 MOMENT_GAP = 2.0           # s between consecutive photos that starts a new "moment"
 SUBJECT_MOVED = 0.65       # subject agreement below this: moved (real bursts 0.96+, a photo shot from a step to the side 0.76, weevil 0.38)
-SUBJECT_MOVED_APART = 0.95  # stricter for a photo from a different moment
 
 
 def taken_time(path):
@@ -635,11 +635,9 @@ def select_photos(aligned, ghosts, ref, apart, log=print, covers=None):
         if sm < SUBJECT_MOVED:
             log(f"frame {i + 1} left out: " + (f"taken {gap_text(gap)} the others, and the subject had moved" if gap
                                               else "the subject moved between photos") + f" (agreement {sm:.2f})")
-        elif gap and sm < SUBJECT_MOVED_APART:
-            log(f"frame {i + 1} left out: taken {gap_text(gap)} the others, and the subject had moved a little (agreement {sm:.2f})")
         else:
             if gap:
-                log(f"frame {i + 1}: taken {gap_text(gap)} the others but lines up well, kept")
+                log(f"frame {i + 1}: taken {gap_text(gap)} the others; used wherever it matches (agreement {sm:.2f})")
             keep.append(i)
     return keep
 

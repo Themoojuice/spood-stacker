@@ -1,8 +1,9 @@
 /* Salticid stacker engine — browser/Node port of stacker.py (OpenCV.js).
    stackFrames(cv, frames, opts) -> {data: Uint8ClampedArray (RGBA), width, height, log, ref}
    frames: [{data: Uint8ClampedArray RGBA, width, height, taken?}]
-           taken: optional capture time in ms (EXIF or file name); photos taken
-           well apart from the rest are checked harder for a moved subject.
+           taken: optional capture time in ms (EXIF or file name); a photo taken
+           well apart from the rest is never the reference, but is otherwise judged
+           like any other: used wherever it matches.
    opts: maxSide, onProgress(p, stage), onLog(msg), onSelection({used, left}),
          onFrame(frame) - optional; receives each lined-up photo cropped and finished
          like the stack ({photo, used, why, ref, width, height, data, focus}) for retouching.
@@ -223,8 +224,7 @@
         if (opts.keepAll) { /* test hook: judge nothing here */ }
         else if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
         else if (sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
-        else if (gap && sm < SUBJECT_MOVED_APART) { keep[i] = false; why[i] = `taken ${gapText(gap)} the others, and the subject had moved a little`; }
-        else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others but lines up well, kept`);
+        else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others; used wherever it matches`);
       }
       const U = g.data32F, C = cover.data32F, T = trust[i].data;
       for (let q = 0; q < U.length; q++) U[q] *= C[q] * T[q] / 255;
@@ -290,7 +290,6 @@
   const MOMENT_GAP = 2000;          // ms between consecutive photos that starts a new "moment"
   const WEAK_MATCH = 0.25;          // fewer than this share of the best photo's matches, and no fine-tune
   const SUBJECT_MOVED = 0.65;       // subject agreement below this: moved (real bursts 0.96+, a photo shot from a step to the side 0.76, weevil 0.38)
-  const SUBJECT_MOVED_APART = 0.95; // stricter for photos from a different moment
   const REPEAT = 0.4;               // repeat score above this: a mesh-like pattern is in view (mesh 0.7-1.4, others <= 0.17)
 
   /** Groups photos into moments by capture time. apart[i] is the signed gap (ms)
