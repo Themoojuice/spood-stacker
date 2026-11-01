@@ -1,6 +1,8 @@
 /* Salticid stacker engine — browser/Node port of stacker.py (OpenCV.js).
    stackFrames(cv, frames, opts) -> {data: Uint8ClampedArray (RGBA), width, height, log, ref}
-   frames: [{data: Uint8ClampedArray RGBA, width, height, taken?}]
+   frames: [{data: Uint8ClampedArray RGBA, width, height, taken?, srcPixels?}] - or, instead of
+           data, read(): async, returns the RGBA pixels (width x height); called once, when
+           the engine reaches that photo.
            taken: optional capture time in ms (EXIF or file name); a photo taken
            well apart from the rest is never the reference, but is otherwise judged
            like any other: used wherever it matches.
@@ -18,6 +20,37 @@
 
   function stackFrames(cv, frames, opts = {}) {
     return run(cv, frames, opts);
+  }
+
+  /* ---------- memory: how big a stack fits ----------
+     OpenCV.js keeps everything in one WebAssembly heap, which this build caps at 1 GiB however
+     much memory the phone has. Big per-photo images wait outside it (park/unpark), so what is
+     left grows with the working size and, more slowly, with the number of photos. The figures
+     are measured peaks (tools/memprobe.js) with a margin. */
+  const HEAP_CAP_MIB = 1024;
+  /** Peak heap need in MiB for n photos at W x H. */
+  function heapNeedMiB(n, W, H) {
+    const mp = W * H / 1e6;
+    return 155 + mp * (29.2 + 1.2 * n);                    // measured: 26 x 12 MP -> 880, 26 x 4.3 MP -> 416
+  }
+  /** The working size (long side) to stack at: the photos' own size, or opts.maxSide if
+      smaller, stepped down until the memory need fits. native: [{width, height}]. */
+  function planSize(native, opts = {}) {
+    const n = native.length;
+    const nativeSide = Math.max(...native.map(d => Math.max(d.width, d.height)));
+    const budget = (opts.lowMemory ? 0.6 : 0.9) * HEAP_CAP_MIB;
+    const dims = side => {
+      let W = 0, H = 0;
+      for (const d of native) { const s = Math.min(1, side / Math.max(d.width, d.height)); W = Math.max(W, Math.round(d.width * s)); H = Math.max(H, Math.round(d.height * s)); }
+      return [W, H];
+    };
+    const want = Math.min(nativeSide, opts.maxSide || Infinity);
+    let side = want, [W, H] = dims(side), need = heapNeedMiB(n, W, H);
+    while (need > budget && side > 1200) {
+      side = Math.max(1200, Math.floor(side * 0.92));
+      [W, H] = dims(side); need = heapNeedMiB(n, W, H);
+    }
+    return { side, width: W, height: H, nativeSide, wanted: want, shrunk: side < want, needMiB: Math.round(need), budgetMiB: Math.round(budget) };
   }
 
   async function run(cv, frames, opts) {
@@ -38,16 +71,30 @@
       const s = Math.min(1, maxSide / Math.max(f.width, f.height));
       W = Math.max(W, Math.round(f.width * s)); H = Math.max(H, Math.round(f.height * s));
     }
-    const rgb = [], gray = [];
+    // the full-size grey is needed only here, for two numbers per photo; everything
+    // before the warp works at <= 1600 px, so only that copy is kept (was a full-size float each)
+    const pre = Math.min(1, 1600 / Math.max(W, H));
+    const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
+    const rgb = [], gray = [], centreFocus = new Array(n), repeatS = new Array(n);
     for (let i = 0; i < n; i++) {
       const f = frames[i];
-      const rgba = cv.matFromArray(f.height, f.width, cv.CV_8UC4, f.data);
+      // a frame can arrive decoded (data) or be decoded only now (read()), one photo at a
+      // time, so a long burst never sits in memory as full-size pixels all at once
+      const fdata = f.read ? await f.read() : f.data;
+      if (!fdata || fdata.length !== f.width * f.height * 4) throw new Error(`Photo ${i + 1} could not be read.`);
+      const rgba = cv.matFromArray(f.height, f.width, cv.CV_8UC4, fdata);
       const c3 = new cv.Mat(); cv.cvtColor(rgba, c3, cv.COLOR_RGBA2RGB); rgba.delete();
       if (c3.cols !== W || c3.rows !== H) {
         const r = new cv.Mat(); cv.resize(c3, r, sz(W, H), 0, 0, (c3.cols > W ? cv.INTER_AREA : cv.INTER_CUBIC));
         c3.delete(); rgb.push(r);
       } else rgb.push(c3);
-      gray.push(toGray(cv, rgb[i]));
+      const g = toGray(cv, rgb[i]);
+      rgb[i] = park(cv, rgb[i]);                       // the photo waits outside the WASM heap
+      const roi = g.roi(new cv.Rect(cx0, cy0, cx1 - cx0, cy1 - cy0));
+      const fm = focusMeasure(cv, roi, 4); centreFocus[i] = cv.mean(fm)[0]; fm.delete(); roi.delete();
+      repeatS[i] = repeatScore(cv, g);
+      if (pre < 1) { const s = new cv.Mat(); cv.resize(g, s, new cv.Size(0, 0), pre, pre, cv.INTER_AREA); g.delete(); gray.push(s); }
+      else gray.push(g);
       f.data = null;                                   // let the browser reclaim the decode
       progress(0.02 + 0.06 * (i + 1) / n, 'Reading photos');
       await tick();
@@ -55,21 +102,20 @@
     say(`${n} photos, working size ${W}×${H}`);
 
     // ---------- 2. masks, order, reference ----------
-    const masks = vignetteMasks(cv, gray);
+    const masks = vignetteMasks(cv, gray, W, H);       // one shared mask, not one copy per photo
     if (opts.onDebug) opts.onDebug('masks', { width: W, height: H, masks: masks.map(m => Uint8Array.from(m.data)) });
     const order = orderFrames(cv, gray);
-    const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
     const moment = moments(frames);
     if (moment.split) say(`taken at ${moment.groups} different moments (more than ${MOMENT_GAP / 1000} s apart)`);
     let ref = 0, best = -1;
     for (let i = 0; i < n; i++) {
       if (moment.apart[i]) continue;                   // the reference comes from the main burst
-      const roi = gray[i].roi(new cv.Rect(cx0, cy0, cx1 - cx0, cy1 - cy0));
-      const f = focusMeasure(cv, roi, 4); const v = cv.mean(f)[0]; f.delete(); roi.delete();
+      const v = centreFocus[i];
       if (v > best) { best = v; ref = i; }
     }
     const refPos = order.indexOf(ref);
-    const repeating = gray.some(g => repeatScore(cv, g) > REPEAT);
+    const repeating = repeatS.some(v => v > REPEAT);
+    const big = Math.max(W, H);
     if (repeating) say('repeating texture in view (a mesh?): lined up from features only');
     say(`focus order ${order.map(o => o + 1).join(' ')}, reference photo ${ref + 1}`);
     progress(0.12, 'Working out focus order');
@@ -85,15 +131,15 @@
       let prev = ref, pos = refPos + dir;
       while (pos >= 0 && pos < n) {
         const cur = order[pos];
-        let a = homography(cv, gray[cur], gray[prev], masks[cur], masks[prev], feats, cur, prev);
+        let a = homography(cv, gray[cur], gray[prev], masks[cur], masks[prev], feats, cur, prev, pre);
         let Hm = mul3(Hs[prev], a.H), best = a.inliers;
         // the matched features, in reference coordinates: the fine-tune must still agree with them
         let pairs = { src: a.src || [], dst: (a.dst || []).map((v, j, D) => j % 2 ? null : applyH(Hs[prev], v, D[j + 1])).filter(Boolean).flat() };
         if (prev !== ref) {
-          const d = homography(cv, gray[cur], gray[ref], masks[cur], masks[ref], feats, cur, ref);
+          const d = homography(cv, gray[cur], gray[ref], masks[cur], masks[ref], feats, cur, ref, pre);
           if (d.inliers > 1.5 * a.inliers || (a.rough && !d.rough && d.inliers >= 20)) { Hm = d.H; best = d.inliers; pairs = { src: d.src || [], dst: d.dst || [] }; a = d; }
         }
-        const r = eccRefine(cv, gray[cur], gray[ref], Hm, masks[ref], pairs, repeating, a.rough);
+        const r = eccRefine(cv, gray[cur], gray[ref], Hm, masks[ref], pairs, repeating, a.rough, big, pre);
         if (a.rough && r.ok) say(`photo ${cur + 1}: framed well apart from the others; lined up by its overall shape first`);
         Hs[cur] = r.H; inl[cur] = best; eccOk[cur] = r.ok || !!r.skipped;
         say(`photo ${cur + 1}: ${best} matches${r.skipped ? '' : `, fine-tune ${r.ok ? 'ok' : 'skipped'}`}`);
@@ -106,11 +152,14 @@
     const warped = new Array(n), wmask = new Array(n);
     for (let i = 0; i < n; i++) {
       const M = cv.matFromArray(3, 3, cv.CV_64F, Hs[i]);
-      warped[i] = new cv.Mat(); cv.warpPerspective(rgb[i], warped[i], M, sz(W, H), cv.INTER_LANCZOS4, cv.BORDER_REFLECT);
-      wmask[i] = new cv.Mat(); cv.warpPerspective(masks[i], wmask[i], M, sz(W, H), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
-      M.delete(); rgb[i].delete();
+      const src = unpark(cv, rgb[i]); rgb[i] = null;
+      const wp = new cv.Mat(); cv.warpPerspective(src, wp, M, sz(W, H), cv.INTER_LANCZOS4, cv.BORDER_REFLECT); src.delete();
+      warped[i] = park(cv, wp);
+      const wm = new cv.Mat(); cv.warpPerspective(masks[i], wm, M, sz(W, H), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
+      wmask[i] = park(cv, wm);
+      M.delete();
     }
-    gray.forEach(g => g.delete()); masks.forEach(m => m.delete());
+    gray.forEach(g => g.delete()); new Set(masks).forEach(m => m.delete());
 
     // ---------- 3b. coverage ----------
     // A photo framed differently covers only part of the reference's view. Where it
@@ -126,30 +175,39 @@
     // mesh, a moved leg) that spot keeps the plain line-up. trust[i] marks where the
     // photo can be believed: the two-way check passed, or the plain line-up already
     // agreed with the reference there.
-    const wg = warped.map(m => toGray(cv, m));
-    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data32F)), Hs: Hs.map(h => h.slice()) });
+    // greys kept as 8-bit (they come from 8-bit photos anyway); a float copy is made
+    // only while one is in use (was a full-size float per photo, 4 bytes a pixel)
+    const wg = warped.map(p => { const m = unpark(cv, p), g = gray8(cv, m); m.delete(); return park(cv, g); });
+    const F = p => { const m = unpark(cv, p), f = f32(cv, m); m.delete(); return f; };     // float grey of a parked 8-bit grey
+    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data, v => v / 255)), Hs: Hs.map(h => h.slice()) });
     const trust = new Array(n).fill(null);
-    const refBlur = new cv.Mat(); cv.GaussianBlur(wg[ref], refBlur, sz(0, 0), 6, 6);
+    let refF = F(wg[ref]);
+    const refBlur = new cv.Mat(); cv.GaussianBlur(refF, refBlur, sz(0, 0), 6, 6);
+    const wmRef = unpark(cv, wmask[ref]);
     done = 0;
     for (let k = 0; k < n; k++) {
       const cur = order[k];
       if (cur === ref) continue;
-      const both = new cv.Mat(); cv.bitwise_and(wmask[ref], wmask[cur], both);
-      const plain = ghostMap(cv, refBlur, wg[cur], hw, hh);
-      const { flow, fb } = denseFlow(cv, wg[ref], wg[cur], both);
-      gateFlow(cv, flow, wg[ref], wg[cur]);
+      const wmCur = unpark(cv, wmask[cur]);
+      const both = new cv.Mat(); cv.bitwise_and(wmRef, wmCur, both);
+      const curF = F(wg[cur]);
+      const plain = ghostMap(cv, refBlur, curF, hw, hh);
+      const { flow, fb } = denseFlow(cv, refF, curF, both);
+      gateFlow(cv, flow, refF, curF);
       const share = movedShare(flow, both);
       const maps = share > 0 ? flowMaps(cv, flow) : null;          // built once, used for every remap below
-      const candG = maps ? remapWith(cv, wg[cur], maps, cv.INTER_LINEAR) : null;
-      const nccG = bandNCC(cv, wg[ref], wg[cur], both), nccF = candG ? bandNCC(cv, wg[ref], candG, both) : -1;
+      const candG = maps ? remapWith(cv, curF, maps, cv.INTER_LINEAR) : null;
+      const nccG = bandNCC(cv, refF, curF, both), nccF = candG ? bandNCC(cv, refF, candG, both) : -1;
+      curF.delete();
       if (candG && nccF >= nccG + 0.002) {
-        const cand = remapWith(cv, warped[cur], maps, cv.INTER_LANCZOS4);
-        warped[cur].delete(); warped[cur] = cand;
-        wg[cur].delete(); wg[cur] = candG;
-        const mf = new cv.Mat(); wmask[cur].convertTo(mf, cv.CV_32F);
+        const wsrc = unpark(cv, warped[cur]);
+        const cand = remapWith(cv, wsrc, maps, cv.INTER_LANCZOS4); wsrc.delete();
+        warped[cur] = park(cv, cand);
+        const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); candG.delete(); wg[cur] = park(cv, g8);
+        const mf = new cv.Mat(); wmCur.convertTo(mf, cv.CV_32F);
         const mr = remapWith(cv, mf, maps, cv.INTER_LINEAR); mf.delete();
         const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY); mr.delete();
-        wmask[cur].delete(); wmask[cur] = new cv.Mat(); mb.convertTo(wmask[cur], cv.CV_8U); mb.delete();
+        const m8 = new cv.Mat(); mb.convertTo(m8, cv.CV_8U); mb.delete(); wmask[cur] = park(cv, m8);
         say(`photo ${cur + 1}: local correction on ${Math.max(1, Math.round(share * 100))}% of it (${nccG.toFixed(3)} → ${nccF.toFixed(3)})`);
       } else {
         if (candG) candG.delete();
@@ -161,13 +219,13 @@
       trust[cur] = new cv.Mat(); fbH.convertTo(trust[cur], cv.CV_8U, 255, 0.5);   // 8-bit: phones are short of memory
       fbH.delete(); plain.delete();
       if (maps) { maps[0].delete(); maps[1].delete(); }
-      flow.delete(); both.delete(); done++;
+      flow.delete(); both.delete(); wmCur.delete(); done++;
       progress(0.45 + 0.2 * done / (n - 1), 'Correcting movement');
       await tick();
     }
-    refBlur.delete();
+    refBlur.delete(); wmRef.delete();
     trust[ref] = new cv.Mat(hh, hw, cv.CV_8U, new cv.Scalar(255));
-    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data32F)), trust: trust.map(t => Float32Array.from(t.data, v => v / 255)), hw, hh });
+    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data, v => v / 255)), trust: trust.map(t => Float32Array.from(t.data, v => v / 255)), hw, hh });
 
     // ---------- 5. choose which photos to use ----------
     const keep = new Array(n).fill(true), why = new Array(n).fill('');
@@ -188,7 +246,7 @@
     // (b) near-duplicates: keep the higher-resolution (then sharper) copy.
     //     Compared only where both photos have pixels of their own.
     const quarter = m => { const s = new cv.Mat(); cv.resize(m, s, new cv.Size(0, 0), 0.25, 0.25, m.type() === cv.CV_8U ? cv.INTER_NEAREST : cv.INTER_AREA); return s; };
-    const thumbs = wg.map(quarter), maskT = wmask.map(quarter);
+    const thumbs = wg.map(g => { const f = F(g), q = quarter(f); f.delete(); return q; }), maskT = wmask.map(p => { const m = unpark(cv, p), q = quarter(m); m.delete(); return q; });
     const sharpT = thumbs.map(t => { const f = focusMeasure(cv, t, 2); const v = cv.mean(f)[0]; f.delete(); return v; });
     const focusT = thumbs.map(t => focusMeasure(cv, t, 2));
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
@@ -213,27 +271,31 @@
     // the reference there (ghost), has pixels of its own there (coverage, fading to 0 over a
     // short band at its edge so a photo that ends mid-frame leaves no seam), and its
     // line-up can be trusted there (trust).
-    const refG6 = new cv.Mat(); cv.GaussianBlur(wg[ref], refG6, sz(0, 0), 6, 6);
+    refF.delete(); refF = F(wg[ref]);
+    const refG6 = new cv.Mat(); cv.GaussianBlur(refF, refG6, sz(0, 0), 6, 6);
     const usable = new Array(n);
     for (let i = 0; i < n; i++) {
-      const g = ghostMap(cv, refG6, wg[i], hw, hh), cover = coverMap(cv, wmask[i], hw, hh);
+      const curF = F(wg[i]), wmi = unpark(cv, wmask[i]);
+      const g = ghostMap(cv, refG6, curF, hw, hh), cover = coverMap(cv, wmi, hw, hh); wmi.delete();
       if (keep[i] && i !== ref) {
         const m = maskedMean(g.data32F, cover.data32F);
-        const sm = subjectAgreement(cv, wg[ref], wg[i], g, cover);
+        const sm = subjectAgreement(cv, refF, curF, g, cover);
         const gap = moment.apart[i];
         if (opts.keepAll) { /* test hook: judge nothing here */ }
         else if (m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
         else if (sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
         else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others; used wherever it matches`);
       }
+      curF.delete();
       const U = g.data32F, C = cover.data32F, T = trust[i].data;
       for (let q = 0; q < U.length; q++) U[q] *= C[q] * T[q] / 255;
-      usable[i] = g; cover.delete(); trust[i].delete(); trust[i] = null;
+      usable[i] = new cv.Mat(); g.convertTo(usable[i], cv.CV_8U, 255); g.delete();     // 8-bit (0..1 in 1/255 steps)
+      cover.delete(); trust[i].delete(); trust[i] = null;
     }
-    refG6.delete();
+    refG6.delete(); refF.delete();
     let idx = [...Array(n).keys()].filter(i => keep[i]);
     // (d) photos that add no sharp detail the others don't already have
-    const share = winnerShare(cv, idx.map(i => wg[i]), idx.map(i => usable[i]));
+    const share = winnerShare(cv, idx.map(i => () => F(wg[i])), idx.map(i => usable[i]));
     if (idx.length > 2) idx.forEach((i, k) => {
       if (i !== ref && share[k] < 0.003) { keep[i] = false; why[i] = 'adds nothing sharp the others lack'; }
     });
@@ -244,8 +306,8 @@
     say(`using ${idx.length} of ${n} photos`);
 
     // crop: everything at least one used photo really saw (not just what all of them saw)
-    const seen = wmask[idx[0]].clone();
-    for (const i of idx.slice(1)) cv.bitwise_or(seen, wmask[i], seen);
+    const seen = unpark(cv, wmask[idx[0]]);
+    for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
     const box = largestRect(cv, seen); seen.delete();
 
     // ---------- 5b. hand the lined-up photos to the retouch brush ----------
@@ -255,22 +317,23 @@
       const offer = [...Array(n).keys()].filter(i => keep[i] || !/lined up/.test(why[i]));
       for (let k = 0; k < offer.length; k++) {
         const i = offer[k];
-        await opts.onFrame(exportFrame(cv, warped[i], wg[i], usable[i], box, {
-          photo: i + 1, used: keep[i], why: why[i], ref: i === ref
-        }));
+        const gF = F(wg[i]), im = unpark(cv, warped[i]), uF = f32(cv, usable[i]);
+        const fr = exportFrame(cv, im, gF, uF, box, { photo: i + 1, used: keep[i], why: why[i], ref: i === ref });
+        gF.delete(); im.delete(); uF.delete();
+        await opts.onFrame(fr);
         progress(0.65 + 0.03 * (k + 1) / offer.length, 'Keeping photos for retouching');
       }
     }
-    for (const i of left) { warped[i].delete(); wg[i].delete(); usable[i].delete(); wmask[i].delete(); }
+    for (const i of left) { warped[i] = wg[i] = wmask[i] = null; usable[i].delete(); }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
     progress(0.67, 'Merging');
     await tick();
 
     // ---------- 6. hybrid fusion ----------
-    keptGray.forEach(m => m.delete());
+    for (const i of idx) wg[i] = null;
     const debug = opts.onDebug ? (name, d) => opts.onDebug(name, Object.assign({ photos: idx.map(i => i + 1), box }, d)) : null;
     const fused = await fuseHybrid(cv, keptImgs, weights, keptMask, p => progress(0.67 + 0.28 * p, 'Merging'), tick, debug);
-    keptImgs.forEach(m => m.delete()); weights.forEach(m => m.delete()); keptMask.forEach(m => m.delete());
+    weights.forEach(m => m.delete());
 
     // ---------- 7. finish ----------
     const b = new cv.Mat(); cv.GaussianBlur(fused, b, sz(0, 0), 1.2, 1.2);
@@ -394,6 +457,13 @@
     const f = new cv.Mat(); g.convertTo(f, cv.CV_32F, 1 / 255); g.delete();
     return f;
   }
+  // 8-bit grey, and its float copy (f32(gray8(x)) is bit-identical to toGray(x))
+  function gray8(cv, rgb8) { const g = new cv.Mat(); cv.cvtColor(rgb8, g, cv.COLOR_RGB2GRAY); return g; }
+  function f32(cv, g8) { const f = new cv.Mat(); g8.convertTo(f, cv.CV_32F, 1 / 255); return f; }
+  // a big image parked outside the WASM heap (which this OpenCV.js build caps at 1 GiB),
+  // copied back in only while it is being worked on. In the browser this could be an OPFS file.
+  function park(cv, m) { const p = { rows: m.rows, cols: m.cols, mtype: m.type(), data: new Uint8Array(m.data) }; m.delete(); return p; }
+  function unpark(cv, p) { const m = new cv.Mat(p.rows, p.cols, p.mtype); m.data.set(p.data); return m; }
 
   function focusMeasure(cv, g, sigma) {
     const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), 0.8, 0.8);
@@ -411,10 +481,11 @@
       outside of one circle or ellipse, with lit scene just inside its rim. A black
       night background, or a dark subject crossing the frame edge, follows the
       subject's outline instead, and is kept. */
-  function vignetteMasks(cv, grays) {
-    const n = grays.length, W = grays[0].cols, H = grays[0].rows;
-    const all = () => grays.map(() => new cv.Mat(H, W, cv.CV_8U, new cv.Scalar(1)));
-    const model = clampModel(cv, grays);
+  function vignetteMasks(cv, grays, W, H) {
+    // the mask is the same for every photo, so one Mat is shared (was n full-size copies)
+    const n = grays.length;
+    const all = () => new Array(n).fill(new cv.Mat(H, W, cv.CV_8U, new cv.Scalar(1)));
+    const model = clampModel(cv, grays, W, H);
     if (!model) return all();
     // the clamp's edge is soft (an out-of-focus lens barrel): keep 2.5% of the frame clear of it
     const { cx, cy, asp, R } = model, margin = 0.025 * Math.max(W, H);
@@ -423,16 +494,14 @@
       const dy = (y - cy) * asp;
       for (let x = 0; x < W; x++, k++) { const dx = x - cx; M[k] = dx * dx + dy * dy < R2 ? 1 : 0; }
     }
-    const out = [m];
-    for (let i = 1; i < n; i++) out.push(m.clone());
-    return out;
+    return new Array(n).fill(m);
   }
 
   /** Fits the clamp's rim, at about 200 px wide. Returns {cx, cy, asp, R} in full-size
       pixels (outside the rim is clamp; asp stretches y: 1 = circle, W/H = an ellipse
       shaped like the frame), or null when there is no clamp. */
-  function clampModel(cv, grays) {
-    const n = grays.length, W = grays[0].cols, H = grays[0].rows;
+  function clampModel(cv, grays, W, H) {
+    const n = grays.length;
     const f = Math.min(1, 200 / Math.max(W, H)), qw = Math.max(8, Math.round(W * f)), qh = Math.max(8, Math.round(H * f)), N = qw * qh;
     const cnt = new Uint8Array(N);
     for (const g of grays) {
@@ -637,11 +706,11 @@
 
   /** AKAZE features of one photo on a downscaled copy, found once and reused for
       every pair the photo is matched in. */
-  function features(cv, cache, i, g, m) {
+  function features(cv, cache, i, g, m, pre) {
     if (cache && cache.has(i)) return cache.get(i);
-    const s = Math.min(1, 1600 / Math.max(g.cols, g.rows));
-    const r = new cv.Mat(); cv.resize(g, r, new cv.Size(0, 0), s, s, cv.INTER_AREA);
-    const u = to8(cv, r); r.delete();
+    // g arrives already at the feature scale `pre` (same resize as before, done at load)
+    const s = pre;
+    const u = to8(cv, g);
     const mm = new cv.Mat(); cv.resize(m, mm, new cv.Size(u.cols, u.rows), 0, 0, cv.INTER_NEAREST);
     const ak = new cv.AKAZE(); ak.setThreshold(0.0005);
     const kv = new cv.KeyPointVector(), d = new cv.Mat();
@@ -654,9 +723,9 @@
     return f;
   }
 
-  function homography(cv, srcG, dstG, mSrc, mDst, cache, iSrc, iDst) {
+  function homography(cv, srcG, dstG, mSrc, mDst, cache, iSrc, iDst, pre) {
     // features on a downscaled copy (speed), H rescaled to full size
-    const F1 = features(cv, cache, iSrc, srcG, mSrc), F2 = features(cv, cache, iDst, dstG, mDst);
+    const F1 = features(cv, cache, iSrc, srcG, mSrc, pre), F2 = features(cv, cache, iDst, dstG, mDst, pre);
     const s = F1.s, d1 = F1.d, d2 = F2.d;
     let res = { H: eye3(), inliers: 0 };
     if (F1.n >= 20 && F2.n >= 20) {
@@ -801,20 +870,20 @@
       whichever cells are nearest and shears the background while the subject's
       features stay put, and two photos fine-tuned that way end up a fraction of a
       cell apart; there the features' line-up is kept and the flow does the rest. */
-  function eccRefine(cv, srcG, dstG, H, mask, pairs, repeating, rough) {
+  function eccRefine(cv, srcG, dstG, H, mask, pairs, repeating, rough, big, pre) {
     if (repeating) return { H, ok: false, skipped: true };
-    const big = Math.max(srcG.cols, srcG.rows);
+    // srcG/dstG are the <= 1600 px greys (scale `pre`); big is the full working size
     if (rough) {
       // a rough start (photo framed far from the rest): first line up the overall shapes,
       // blurred enough that focus differences don't matter, then the usual fine-tune
-      const c = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 500 / big), 0.006 * big);
+      const c = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 500 / big), 0.006 * big, 100, pre);
       if (c && (!pairs || pairError(c, pairs) < Math.max(12, 0.012 * big))) H = c;
       else return { H, ok: false };
     }
     // half size first (a quarter of the work per step, most of the steps), then a few
     // steps at the working size; each stops once the change is under 1e-5
-    const half = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 550 / big), 2, 100);
-    const Hn = eccStage(cv, srcG, dstG, half || H, mask, Math.min(0.5, 1100 / big), 2, 25);
+    const half = eccStage(cv, srcG, dstG, H, mask, Math.min(0.25, 550 / big), 2, 100, pre);
+    const Hn = eccStage(cv, srcG, dstG, half || H, mask, Math.min(0.5, 1100 / big), 2, 25, pre);
     if (!Hn) return { H, ok: false };
     const e0 = pairs ? pairError(H, pairs) : 0, e1 = pairs ? pairError(Hn, pairs) : 0;
     if (!(e1 < Math.max(4, 0.004 * big, 2 * e0))) return { H, ok: false };
@@ -853,12 +922,12 @@
     return best;
   }
 
-  function eccStage(cv, srcG, dstG, H, mask, scale, sigma, iters = 100) {
+  function eccStage(cv, srcG, dstG, H, mask, scale, sigma, iters = 100, pre = 1) {
     // shrink first, then gradients at that size (blur scaled to match): same result, a
-    // fraction of the work
+    // fraction of the work. The greys arrive at scale `pre` already.
     const s0 = new cv.Mat(), d0 = new cv.Mat(), m = new cv.Mat();
-    cv.resize(srcG, s0, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
-    cv.resize(dstG, d0, new cv.Size(0, 0), scale, scale, cv.INTER_AREA);
+    cv.resize(srcG, s0, new cv.Size(0, 0), scale / pre, scale / pre, cv.INTER_AREA);
+    cv.resize(dstG, d0, new cv.Size(0, 0), scale / pre, scale / pre, cv.INTER_AREA);
     const sg = Math.max(0.5, sigma * scale);
     const s = gradMag(cv, s0, sg), d = gradMag(cv, d0, sg);
     cv.resize(mask, m, new cv.Size(d.cols, d.rows), 0, 0, cv.INTER_NEAREST);
@@ -1040,10 +1109,12 @@
   function winnerShare(cv, grays, ghosts) {
     // fraction of the frame where each photo is the sharpest or close to it (at 1/4
     // size); a near-equal photo still adds something: its detail is merged in
-    const fs = grays.map((g, k) => {
-      const s = new cv.Mat(); cv.resize(g, s, new cv.Size(0, 0), 0.25, 0.25, cv.INTER_AREA);
+    const fs = grays.map((get, k) => {
+      const g = get();                                              // a float grey, made on demand
+      const s = new cv.Mat(); cv.resize(g, s, new cv.Size(0, 0), 0.25, 0.25, cv.INTER_AREA); g.delete();
       const f = focusMeasure(cv, s, 2); s.delete();
-      const gh = new cv.Mat(); cv.resize(ghosts[k], gh, new cv.Size(f.cols, f.rows), 0, 0, cv.INTER_AREA);
+      const g8 = ghosts[k], gF = g8.type() === cv.CV_8U ? f32(cv, g8) : g8;
+      const gh = new cv.Mat(); cv.resize(gF, gh, new cv.Size(f.cols, f.rows), 0, 0, cv.INTER_AREA); if (gF !== g8) gF.delete();
       cv.multiply(f, gh, f); gh.delete();
       return f;
     });
@@ -1107,23 +1178,24 @@
     return s;
   }
 
-  function gaussPyr(cv, m, levels = LEVELS) {
-    const g = [m.clone()];
+  function gaussPyr(cv, m, levels = LEVELS, own = false) {
+    const g = [own ? m : m.clone()];                 // own = take m over instead of copying it
     for (let i = 0; i < levels; i++) { const d = new cv.Mat(); cv.pyrDown(g[i], d); g.push(d); }
     return g;
   }
 
   /** Laplacian pyramid; with levels < LEVELS only the finest `levels` bands. */
   function lapPyr(cv, m, levels = LEVELS) {
-    const full = levels >= LEVELS;
-    const g = gaussPyr(cv, m, full ? LEVELS : levels), l = [];
-    for (let i = 0; i < (full ? LEVELS : levels); i++) {
+    // takes m over (the caller must not delete it) and turns each Gaussian level into
+    // its band in place: one full-size float copy at a time instead of three (and no clone)
+    const full = levels >= LEVELS, L = full ? LEVELS : levels;
+    const g = gaussPyr(cv, m, L, true);
+    for (let i = 0; i < L; i++) {
       const u = new cv.Mat(); cv.pyrUp(g[i + 1], u, new cv.Size(g[i].cols, g[i].rows));
-      const d = new cv.Mat(); cv.subtract(g[i], u, d); u.delete(); l.push(d);
+      cv.subtract(g[i], u, g[i]); u.delete();
     }
-    if (full) l.push(g[LEVELS]); else g[levels].delete();
-    for (let i = 0; i < (full ? LEVELS : levels); i++) g[i].delete();
-    return l;
+    if (!full) { g[L].delete(); g.length = L; }
+    return g;
   }
 
   /** Local detail energy of one pyramid band (sum over colour channels, lightly smoothed). */
@@ -1144,7 +1216,7 @@
     const Fh = [], texMax = new Float32Array(W * H), N = hw * hh, meanHalf = new Float32Array(N);
     for (let i = 0; i < n; i++) {
       // grey copy made on the fly (keeps memory down on phones)
-      const gray = toGray(cv, imgs8[i]);
+      const im = unpark(cv, imgs8[i]), gray = toGray(cv, im); im.delete();
       const f = focusMeasure(cv, gray, 4);
       const s = new cv.Mat(); cv.resize(f, s, half, 0, 0, cv.INTER_AREA); f.delete(); Fh.push(s);
       const f2 = focusMeasure(cv, gray, 2), T = f2.data32F, V = valid[i].data;
@@ -1157,10 +1229,10 @@
     }
     // the sharpest photo at each spot, among those that have pixels there
     const Fmax = new Float32Array(N);
-    for (let i = 0; i < n; i++) { const d = Fh[i].data32F, g = weights[i].data32F; for (let k = 0; k < N; k++) if (g[k] > 0.02 && d[k] > Fmax[k]) Fmax[k] = d[k]; }
+    for (let i = 0; i < n; i++) { const d = Fh[i].data32F, g = weights[i].data; for (let k = 0; k < N; k++) if (g[k] > 0.02 * 255 && d[k] > Fmax[k]) Fmax[k] = d[k]; }
     for (let i = 0; i < n; i++) {
-      const d = Fh[i].data32F, g = weights[i].data32F;
-      for (let k = 0; k < N; k++) { const r = Math.min(1, d[k] / (Fmax[k] + 1e-9)); d[k] = r * r * r * r * g[k] + 1e-6; }
+      const d = Fh[i].data32F, g = weights[i].data;
+      for (let k = 0; k < N; k++) { const r = Math.min(1, d[k] / (Fmax[k] + 1e-9)); d[k] = r * r * r * r * g[k] / 255 + 1e-6; }
     }
     normalise(Fh, N);
     const meanG = cv.matFromArray(hh, hw, cv.CV_32F, meanHalf);
@@ -1187,7 +1259,7 @@
     }
     tex.delete(); tb.delete();
     cv.GaussianBlur(TM, TM, new cv.Size(0, 0), 3, 3);
-    const tp = gaussPyr(cv, TM); TM.delete();
+    const tp = gaussPyr(cv, TM, LEVELS, true);
 
     // --- pass 1: weighted pyramid at every level; at the fine levels, find the
     //     sharpest photo at each spot (and the noise level of each band) ---
@@ -1197,14 +1269,14 @@
     const bestC = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h * 3));
     const noise = new Array(FINE).fill(Infinity);
     const ghostPyr = i => {
-      const gf = new cv.Mat(); cv.resize(weights[i], gf, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR);
-      const gg = gaussPyr(cv, gf, FINE); gf.delete(); return gg;
+      const wF = f32(cv, weights[i]), gf = new cv.Mat(); cv.resize(wF, gf, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR); wF.delete();
+      return gaussPyr(cv, gf, FINE, true);
     };
     for (let i = 0; i < n; i++) {
-      const f = new cv.Mat(); imgs8[i].convertTo(f, cv.CV_32FC3, 1 / 255);
-      const lp = lapPyr(cv, f); f.delete();
+      const im = unpark(cv, imgs8[i]), f = new cv.Mat(); im.convertTo(f, cv.CV_32FC3, 1 / 255); im.delete();
+      const lp = lapPyr(cv, f);
       const wf = new cv.Mat(); cv.resize(Fh[i], wf, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR);
-      const gw = gaussPyr(cv, wf); wf.delete();
+      const gw = gaussPyr(cv, wf, LEVELS, true);
       const gg = ghostPyr(i);
       for (let L = 0; L <= LEVELS; L++) {
         const C = lp[L].data32F, Wt = gw[L].data32F, A = acc[L];
@@ -1239,8 +1311,8 @@
     const den = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h));
     const count = debug ? new Uint8Array(sizes[1][0] * sizes[1][1]) : null;
     for (let i = 0; i < n; i++) {
-      const f = new cv.Mat(); imgs8[i].convertTo(f, cv.CV_32FC3, 1 / 255);
-      const lp = lapPyr(cv, f, FINE); f.delete();
+      const im = unpark(cv, imgs8[i]), f = new cv.Mat(); im.convertTo(f, cv.CV_32FC3, 1 / 255); im.delete();
+      const lp = lapPyr(cv, f, FINE);
       const gg = ghostPyr(i);
       for (let L = 0; L < FINE; L++) {
         const e = bandEnergy(cv, lp[L]), E = e.data32F, C = lp[L].data32F, G = gg[L].data32F;
@@ -1280,9 +1352,8 @@
     for (let L = LEVELS - 1; L >= 0; L--) {
       const [w, h] = sizes[L];
       const u = new cv.Mat(); cv.pyrUp(img, u, new cv.Size(w, h)); img.delete();
-      const l = cv.matFromArray(h, w, cv.CV_32FC3, acc[L]);
-      img = new cv.Mat(); cv.add(u, l, img); u.delete(); l.delete();
-      acc[L] = null;
+      const U = u.data32F, A = acc[L]; for (let k = 0; k < U.length; k++) U[k] += A[k];
+      img = u; acc[L] = null;
     }
     progress(1);
     return img;
@@ -1330,7 +1401,7 @@
     return { x, y, w: x1 - x + 1, h: y1 - y + 1 };
   }
 
-  const api = { stackFrames };
+  const api = { stackFrames, planSize, heapNeedMiB };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SalticidStacker = api;
 })(typeof self !== 'undefined' ? self : this);
