@@ -1,4 +1,4 @@
-# Builds OpenCV.js 4.10.0 for Spood Stacker: WebAssembly SIMD, a 4 GiB memory ceiling, single
+# Builds OpenCV.js 4.10.0 for Spood Stacker (the memory ceiling is set in OpenCV's own link flags, below): WebAssembly SIMD, a 4 GiB memory ceiling, single
 # thread (GitHub Pages can't send the headers threads need). Runs when this file changes on the
 # opencv-build branch, and commits the result (and the build log) back to that branch.
 name: Build OpenCV.js (SIMD, 4 GiB)
@@ -33,8 +33,7 @@ jobs:
         run: |
           emcc --version | head -1 | tee tools/opencv-build/emcc-version.txt
           python3 opencv/platforms/js/build_js.py build_js --build_wasm --simd \
-            --emscripten_dir="$EMSDK/upstream/emscripten" \
-            --build_flags="-s MAXIMUM_MEMORY=4GB -O3" 2>&1 | tee build.log
+            --emscripten_dir="$EMSDK/upstream/emscripten" 2>&1 | tee build.log
           test -f build_js/bin/opencv.js
       - name: Commit the result and the log
         if: always()
