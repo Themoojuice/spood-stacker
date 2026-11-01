@@ -29,6 +29,14 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 5. **Per-region merging.** Each pixel comes from whichever photos are sharpest there, weighted by where each photo has pixels, agrees with the reference and can be trusted. So a photo with a sharp head and a blurry body contributes only its head. Coarse levels are blended by sharpness weights. Fine detail is merged from every photo that is nearly as sharp as the best one at that spot (at least 55%), as far as its detail agrees with the best photo's: near-equals average out each other's noise, while a photo whose detail differs (a slightly different line-up, a moved leg) is left out of that spot.
 6. The image is cropped to the area that at least one used photo saw (not just the area every photo saw), keeping roughly the photo's own shape, and lightly sharpened. The lined-up photos are kept, cropped and sharpened the same way, for the retouch brush.
 
+### Memory and stack size
+With **Full detail** ticked (the default) the app stacks at the photos' own size, so a 12 MP burst comes out at about 12 MP. OpenCV.js keeps its work in one WebAssembly heap with a hard ceiling, however much memory the phone has, so the engine keeps that heap small instead:
+- The photos stay as files until the engine reaches each one; they are decoded in the background thread one at a time.
+- Lining up works on copies at most 1,600 px across; the big per-photo images (each lined-up photo, its grey copy and its coverage mask) wait outside the heap and are copied in only while being worked on.
+- Greys are 8-bit, the clamp mask is shared by all photos, and pyramid bands are built in place.
+
+Before starting, the engine estimates its peak memory from the number of photos and their size (`planSize` in `engine.js`, from measured peaks) and picks the largest working size that fits; if it had to shrink the stack, the result card says so. Running out of memory anyway still retries by itself at a smaller size. `node tools/memprobe.js` measures the heap per stage (see its header).
+
 ## Comparing engine versions
 Every change to `engine.js` should be checked against a known-good version on the same bursts, so a fix for one artefact can't quietly break another.
 
@@ -62,6 +70,6 @@ The synthetic scenes (`tests/make_synthetic.py`): `bark` (handheld lean-in with 
 - `sw.js`: service worker (receives shared photos, works offline)
 - `manifest.webmanifest`: install and share-menu settings
 - `vendor/opencv-4.10.0.js`: OpenCV.js 4.10.0 (from `@techstark/opencv-js`, Apache 2.0)
-- `tools/`: the engine compare tool
+- `tools/`: the engine compare tool and the memory probe
 - `tests/`: synthetic bursts and app checks
 - `desktop/`: the laptop version
