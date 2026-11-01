@@ -1,0 +1,48 @@
+# Builds OpenCV.js 4.10.0 for Spood Stacker: WebAssembly SIMD, a 4 GiB memory ceiling, single
+# thread (GitHub Pages can't send the headers threads need). Runs when this file changes on the
+# opencv-build branch, and commits the result (and the build log) back to that branch.
+name: Build OpenCV.js (SIMD, 4 GiB)
+on:
+  push:
+    branches: [opencv-build]
+    paths: ['.github/workflows/opencv-js.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv
+          ref: 4.10.0
+          path: opencv
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+      - name: Raise the memory ceiling to 4 GiB
+        run: |
+          mkdir -p tools/opencv-build
+          grep -rn "WASM_MEM_MAX\|MAXIMUM_MEMORY\|TOTAL_MEMORY\|INITIAL_MEMORY" opencv/modules/js/CMakeLists.txt opencv/platforms/js/build_js.py | tee tools/opencv-build/memory-flags-before.txt
+          sed -i -E 's/WASM_MEM_MAX=[0-9]+[KMG]?B?/MAXIMUM_MEMORY=4GB/g; s/MAXIMUM_MEMORY=[0-9]+[KMG]?B?/MAXIMUM_MEMORY=4GB/g' opencv/modules/js/CMakeLists.txt opencv/platforms/js/build_js.py
+          grep -rn "WASM_MEM_MAX\|MAXIMUM_MEMORY\|TOTAL_MEMORY\|INITIAL_MEMORY" opencv/modules/js/CMakeLists.txt opencv/platforms/js/build_js.py | tee tools/opencv-build/memory-flags-after.txt
+      - name: Build
+        run: |
+          emcc --version | head -1 | tee tools/opencv-build/emcc-version.txt
+          python3 opencv/platforms/js/build_js.py build_js --build_wasm --simd \
+            --emscripten_dir="$EMSDK/upstream/emscripten" \
+            --build_flags="-s MAXIMUM_MEMORY=4GB -O3" 2>&1 | tee build.log
+          test -f build_js/bin/opencv.js
+      - name: Commit the result and the log
+        if: always()
+        run: |
+          mkdir -p tools/opencv-build vendor
+          tail -400 build.log > tools/opencv-build/build-tail.log 2>/dev/null || true
+          if [ -f build_js/bin/opencv.js ]; then cp build_js/bin/opencv.js vendor/opencv-4.10.0-simd.js; ls -la vendor/opencv-4.10.0-simd.js > tools/opencv-build/result.txt; else echo "build failed" > tools/opencv-build/result.txt; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f tools/opencv-build vendor/opencv-4.10.0-simd.js 2>/dev/null || git add -f tools/opencv-build
+          git commit -m "OpenCV.js SIMD build output" && git push
