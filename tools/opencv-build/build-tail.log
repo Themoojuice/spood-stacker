@@ -1,0 +1,166 @@
+Args: Namespace(build_dir='build_js', opencv_dir='/home/runner/work/spood-stacker/spood-stacker/opencv', emscripten_dir='/home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten', build_wasm=True, disable_wasm=False, disable_single_file=False, threads=False, simd=True, build_test=False, build_perf=False, build_doc=False, build_loader=False, clean_build_dir=False, skip_config=False, config_only=False, enable_exception=False, cmake_option=None, build_flags='-s MAXIMUM_MEMORY=4GB -O3', build_wasm_intrin_test=False, config='/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/opencv_js.config.py', webnn=False)
+Check dir /home/runner/work/spood-stacker/spood-stacker/build_js (create: True, clean: False)
+Check dir /home/runner/work/spood-stacker/spood-stacker/opencv (create: False, clean: False)
+Check dir /home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten (create: False, clean: False)
+=====
+===== Config OpenCV.js build for wasm
+=====
+Executing: ['cmake', '-DPYTHON_DEFAULT_EXECUTABLE=/usr/bin/python3', '-DENABLE_PIC=FALSE', '-DCMAKE_BUILD_TYPE=Release', "-DCPU_BASELINE=''", '-DCMAKE_INSTALL_PREFIX=/usr/local', "-DCPU_DISPATCH=''", '-DCV_TRACE=OFF', '-DBUILD_SHARED_LIBS=OFF', '-DWITH_1394=OFF', '-DWITH_ADE=OFF', '-DWITH_VTK=OFF', '-DWITH_EIGEN=OFF', '-DWITH_FFMPEG=OFF', '-DWITH_GSTREAMER=OFF', '-DWITH_GTK=OFF', '-DWITH_GTK_2_X=OFF', '-DWITH_IPP=OFF', '-DWITH_JASPER=OFF', '-DWITH_JPEG=OFF', '-DWITH_WEBP=OFF', '-DWITH_OPENEXR=OFF', '-DWITH_OPENGL=OFF', '-DWITH_OPENVX=OFF', '-DWITH_OPENNI=OFF', '-DWITH_OPENNI2=OFF', '-DWITH_PNG=OFF', '-DWITH_TBB=OFF', '-DWITH_TIFF=OFF', '-DWITH_V4L=OFF', '-DWITH_OPENCL=OFF', '-DWITH_OPENCL_SVM=OFF', '-DWITH_OPENCLAMDFFT=OFF', '-DWITH_OPENCLAMDBLAS=OFF', '-DWITH_GPHOTO2=OFF', '-DWITH_LAPACK=OFF', '-DWITH_ITT=OFF', '-DWITH_QUIRC=OFF', '-DBUILD_ZLIB=ON', '-DBUILD_opencv_apps=OFF', '-DBUILD_opencv_calib3d=ON', '-DBUILD_opencv_dnn=ON', '-DBUILD_opencv_features2d=ON', '-DBUILD_opencv_flann=ON', '-DBUILD_opencv_gapi=OFF', '-DBUILD_opencv_ml=OFF', '-DBUILD_opencv_photo=ON', '-DBUILD_opencv_imgcodecs=OFF', '-DBUILD_opencv_shape=OFF', '-DBUILD_opencv_videoio=OFF', '-DBUILD_opencv_videostab=OFF', '-DBUILD_opencv_highgui=OFF', '-DBUILD_opencv_superres=OFF', '-DBUILD_opencv_stitching=OFF', '-DBUILD_opencv_java=OFF', '-DBUILD_opencv_js=ON', '-DBUILD_opencv_python2=OFF', '-DBUILD_opencv_python3=OFF', '-DBUILD_EXAMPLES=ON', '-DBUILD_PACKAGE=OFF', '-DBUILD_TESTS=ON', '-DBUILD_PERF_TESTS=ON', "-DCMAKE_TOOLCHAIN_FILE='/home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake'", '-DBUILD_DOCS=OFF', '-DWITH_PTHREADS_PF=OFF', '-DCV_ENABLE_INTRINSICS=ON', '-DBUILD_WASM_INTRIN_TESTS=OFF', '-DCMAKE_C_FLAGS=\'-s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s MAXIMUM_MEMORY=4GB -O3-s EXPORTED_FUNCTIONS="[\'_malloc\', \'_free\']"\'', '-DCMAKE_CXX_FLAGS=\'-s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s MAXIMUM_MEMORY=4GB -O3-s EXPORTED_FUNCTIONS="[\'_malloc\', \'_free\']"\'', '/home/runner/work/spood-stacker/spood-stacker/opencv']
+Re-run cmake no build system arguments
+CMake Deprecation Warning at CMakeLists.txt:25 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Warning (dev) at CMakeLists.txt:127 (enable_language):
+  project() should be called prior to this enable_language() call.
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Detected processor: x86
+-- Found PythonInterp: /usr/bin/python3 (found suitable version "3.12.3", minimum required is "3.2")
+-- Could NOT find PythonLibs (missing: PYTHON_LIBRARIES PYTHON_INCLUDE_DIRS) (Required is at least version "3.12")
+-- Cannot probe for Python/Numpy support (because we are cross-compiling OpenCV)
+-- If you want to enable Python/Numpy support, set the following variables:
+--   PYTHON2_INCLUDE_PATH
+--   PYTHON2_LIBRARIES (optional on Unix-like systems)
+--   PYTHON2_NUMPY_INCLUDE_DIRS
+--   PYTHON3_INCLUDE_PATH
+--   PYTHON3_LIBRARIES (optional on Unix-like systems)
+--   PYTHON3_NUMPY_INCLUDE_DIRS
+-- Looking for ccache - not found
+-- Performing Test HAVE_CXX_FSIGNED_CHAR
+-- Performing Test HAVE_CXX_FSIGNED_CHAR - Failed
+-- Performing Test HAVE_C_FSIGNED_CHAR
+-- Performing Test HAVE_C_FSIGNED_CHAR - Failed
+-- Performing Test HAVE_CXX_W
+-- Performing Test HAVE_CXX_W - Failed
+-- Performing Test HAVE_C_W
+-- Performing Test HAVE_C_W - Failed
+-- Performing Test HAVE_CXX_WALL
+-- Performing Test HAVE_CXX_WALL - Failed
+-- Performing Test HAVE_C_WALL
+-- Performing Test HAVE_C_WALL - Failed
+-- Performing Test HAVE_CXX_WRETURN_TYPE
+-- Performing Test HAVE_CXX_WRETURN_TYPE - Failed
+-- Performing Test HAVE_C_WRETURN_TYPE
+-- Performing Test HAVE_C_WRETURN_TYPE - Failed
+-- Performing Test HAVE_CXX_WNON_VIRTUAL_DTOR
+-- Performing Test HAVE_CXX_WNON_VIRTUAL_DTOR - Failed
+-- Performing Test HAVE_C_WNON_VIRTUAL_DTOR
+-- Performing Test HAVE_C_WNON_VIRTUAL_DTOR - Failed
+-- Performing Test HAVE_CXX_WADDRESS
+-- Performing Test HAVE_CXX_WADDRESS - Failed
+-- Performing Test HAVE_C_WADDRESS
+-- Performing Test HAVE_C_WADDRESS - Failed
+-- Performing Test HAVE_CXX_WSEQUENCE_POINT
+-- Performing Test HAVE_CXX_WSEQUENCE_POINT - Failed
+-- Performing Test HAVE_C_WSEQUENCE_POINT
+-- Performing Test HAVE_C_WSEQUENCE_POINT - Failed
+-- Performing Test HAVE_CXX_WFORMAT
+-- Performing Test HAVE_CXX_WFORMAT - Failed
+-- Performing Test HAVE_C_WFORMAT
+-- Performing Test HAVE_C_WFORMAT - Failed
+-- Performing Test HAVE_CXX_WFORMAT_SECURITY
+-- Performing Test HAVE_CXX_WFORMAT_SECURITY - Failed
+-- Performing Test HAVE_C_WFORMAT_SECURITY
+-- Performing Test HAVE_C_WFORMAT_SECURITY - Failed
+-- Performing Test HAVE_CXX_WMISSING_DECLARATIONS
+-- Performing Test HAVE_CXX_WMISSING_DECLARATIONS - Failed
+-- Performing Test HAVE_C_WMISSING_DECLARATIONS
+-- Performing Test HAVE_C_WMISSING_DECLARATIONS - Failed
+-- Performing Test HAVE_CXX_WMISSING_PROTOTYPES
+-- Performing Test HAVE_CXX_WMISSING_PROTOTYPES - Failed
+-- Performing Test HAVE_C_WMISSING_PROTOTYPES
+-- Performing Test HAVE_C_WMISSING_PROTOTYPES - Failed
+-- Performing Test HAVE_CXX_WSTRICT_PROTOTYPES
+-- Performing Test HAVE_CXX_WSTRICT_PROTOTYPES - Failed
+-- Performing Test HAVE_C_WSTRICT_PROTOTYPES
+-- Performing Test HAVE_C_WSTRICT_PROTOTYPES - Failed
+-- Performing Test HAVE_CXX_WUNDEF
+-- Performing Test HAVE_CXX_WUNDEF - Failed
+-- Performing Test HAVE_C_WUNDEF
+-- Performing Test HAVE_C_WUNDEF - Failed
+-- Performing Test HAVE_CXX_WINIT_SELF
+-- Performing Test HAVE_CXX_WINIT_SELF - Failed
+-- Performing Test HAVE_C_WINIT_SELF
+-- Performing Test HAVE_C_WINIT_SELF - Failed
+-- Performing Test HAVE_CXX_WPOINTER_ARITH
+-- Performing Test HAVE_CXX_WPOINTER_ARITH - Failed
+-- Performing Test HAVE_C_WPOINTER_ARITH
+-- Performing Test HAVE_C_WPOINTER_ARITH - Failed
+-- Performing Test HAVE_CXX_WSHADOW
+-- Performing Test HAVE_CXX_WSHADOW - Failed
+-- Performing Test HAVE_C_WSHADOW
+-- Performing Test HAVE_C_WSHADOW - Failed
+-- Performing Test HAVE_CXX_WSIGN_PROMO
+-- Performing Test HAVE_CXX_WSIGN_PROMO - Failed
+-- Performing Test HAVE_C_WSIGN_PROMO
+-- Performing Test HAVE_C_WSIGN_PROMO - Failed
+-- Performing Test HAVE_CXX_WUNINITIALIZED
+-- Performing Test HAVE_CXX_WUNINITIALIZED - Failed
+-- Performing Test HAVE_C_WUNINITIALIZED
+-- Performing Test HAVE_C_WUNINITIALIZED - Failed
+-- Performing Test HAVE_CXX_WINCONSISTENT_MISSING_OVERRIDE
+-- Performing Test HAVE_CXX_WINCONSISTENT_MISSING_OVERRIDE - Failed
+-- Performing Test HAVE_C_WINCONSISTENT_MISSING_OVERRIDE
+-- Performing Test HAVE_C_WINCONSISTENT_MISSING_OVERRIDE - Failed
+-- Performing Test HAVE_CXX_WNO_DELETE_NON_VIRTUAL_DTOR
+-- Performing Test HAVE_CXX_WNO_DELETE_NON_VIRTUAL_DTOR - Failed
+-- Performing Test HAVE_C_WNO_DELETE_NON_VIRTUAL_DTOR
+-- Performing Test HAVE_C_WNO_DELETE_NON_VIRTUAL_DTOR - Failed
+-- Performing Test HAVE_CXX_WNO_UNNAMED_TYPE_TEMPLATE_ARGS
+-- Performing Test HAVE_CXX_WNO_UNNAMED_TYPE_TEMPLATE_ARGS - Failed
+-- Performing Test HAVE_C_WNO_UNNAMED_TYPE_TEMPLATE_ARGS
+-- Performing Test HAVE_C_WNO_UNNAMED_TYPE_TEMPLATE_ARGS - Failed
+-- Performing Test HAVE_CXX_WNO_COMMENT
+-- Performing Test HAVE_CXX_WNO_COMMENT - Failed
+-- Performing Test HAVE_C_WNO_COMMENT
+-- Performing Test HAVE_C_WNO_COMMENT - Failed
+-- Performing Test HAVE_CXX_WNO_DEPRECATED_ENUM_ENUM_CONVERSION
+-- Performing Test HAVE_CXX_WNO_DEPRECATED_ENUM_ENUM_CONVERSION - Failed
+-- Performing Test HAVE_C_WNO_DEPRECATED_ENUM_ENUM_CONVERSION
+-- Performing Test HAVE_C_WNO_DEPRECATED_ENUM_ENUM_CONVERSION - Failed
+-- Performing Test HAVE_CXX_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION
+-- Performing Test HAVE_CXX_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION - Failed
+-- Performing Test HAVE_C_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION
+-- Performing Test HAVE_C_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION - Failed
+-- Performing Test HAVE_CXX_FDIAGNOSTICS_SHOW_OPTION
+-- Performing Test HAVE_CXX_FDIAGNOSTICS_SHOW_OPTION - Failed
+-- Performing Test HAVE_C_FDIAGNOSTICS_SHOW_OPTION
+-- Performing Test HAVE_C_FDIAGNOSTICS_SHOW_OPTION - Failed
+-- Performing Test HAVE_CXX_QUNUSED_ARGUMENTS
+-- Performing Test HAVE_CXX_QUNUSED_ARGUMENTS - Failed
+-- Performing Test HAVE_C_QUNUSED_ARGUMENTS
+-- Performing Test HAVE_C_QUNUSED_ARGUMENTS - Failed
+-- Performing Test HAVE_CXX_FFUNCTION_SECTIONS
+-- Performing Test HAVE_CXX_FFUNCTION_SECTIONS - Failed
+-- Performing Test HAVE_C_FFUNCTION_SECTIONS
+-- Performing Test HAVE_C_FFUNCTION_SECTIONS - Failed
+-- Performing Test HAVE_CXX_FDATA_SECTIONS
+-- Performing Test HAVE_CXX_FDATA_SECTIONS - Failed
+-- Performing Test HAVE_C_FDATA_SECTIONS
+-- Performing Test HAVE_C_FDATA_SECTIONS - Failed
+-- Performing Test HAVE_CPU_BASELINE_FLAGS
+-- Performing Test HAVE_CPU_BASELINE_FLAGS - Failed
+CMake Error at cmake/OpenCVCompilerOptimizations.cmake:654 (message):
+  Compiler doesn't support baseline optimization flags:
+Call Stack (most recent call first):
+  cmake/OpenCVCompilerOptions.cmake:338 (ocv_compiler_optimization_options)
+  CMakeLists.txt:681 (include)
+
+
+-- Configuring incomplete, errors occurred!
+-----------------------------------------------------------
+options.opencv_dir: /home/runner/work/spood-stacker/spood-stacker/opencv
+Traceback (most recent call last):
+  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 296, in <module>
+    builder.config()
+  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 204, in config
+    execute(cmd)
+  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 23, in execute
+    raise Fail("Child returned: %s" % retcode)
+Fail: Child returned: 1
