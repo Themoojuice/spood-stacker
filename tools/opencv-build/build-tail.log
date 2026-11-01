@@ -1,166 +1,400 @@
-Args: Namespace(build_dir='build_js', opencv_dir='/home/runner/work/spood-stacker/spood-stacker/opencv', emscripten_dir='/home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten', build_wasm=True, disable_wasm=False, disable_single_file=False, threads=False, simd=True, build_test=False, build_perf=False, build_doc=False, build_loader=False, clean_build_dir=False, skip_config=False, config_only=False, enable_exception=False, cmake_option=None, build_flags='-s MAXIMUM_MEMORY=4GB -O3', build_wasm_intrin_test=False, config='/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/opencv_js.config.py', webnn=False)
-Check dir /home/runner/work/spood-stacker/spood-stacker/build_js (create: True, clean: False)
-Check dir /home/runner/work/spood-stacker/spood-stacker/opencv (create: False, clean: False)
-Check dir /home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten (create: False, clean: False)
+   18 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2292:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2292 |     v128_t t00 = wasm_v8x16_shuffle(a.val, b.val, 0,1,2,3,16,17,18,19,0,0,0,0,4,5,6,7);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:21:6: note: expanded from here
+   21 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2293:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2293 |     v128_t t01 = wasm_v8x16_shuffle(a.val, b.val, 20,21,22,23,0,0,0,0,8,9,10,11,24,25,26,27);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:24:6: note: expanded from here
+   24 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2294:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2294 |     v128_t t02 = wasm_v8x16_shuffle(a.val, b.val, 0,0,0,0,12,13,14,15,28,29,30,31,0,0,0,0);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:27:6: note: expanded from here
+   27 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2296:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2296 |     v128_t t10 = wasm_v8x16_shuffle(t00, c.val, 0,1,2,3,4,5,6,7,16,17,18,19,12,13,14,15);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:30:6: note: expanded from here
+   30 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2297:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2297 |     v128_t t11 = wasm_v8x16_shuffle(t01, c.val, 0,1,2,3,20,21,22,23,8,9,10,11,12,13,14,15);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:33:6: note: expanded from here
+   33 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2298:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2298 |     v128_t t12 = wasm_v8x16_shuffle(t02, c.val, 24,25,26,27,4,5,6,7,8,9,10,11,28,29,30,31);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:36:6: note: expanded from here
+   36 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2332:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2332 |     v128_t t00 = wasm_v8x16_shuffle(a.val, b.val, 0,1,2,3,16,17,18,19,0,0,0,0,4,5,6,7);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:39:6: note: expanded from here
+   39 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2333:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2333 |     v128_t t01 = wasm_v8x16_shuffle(a.val, b.val, 20,21,22,23,0,0,0,0,8,9,10,11,24,25,26,27);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:42:6: note: expanded from here
+   42 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2334:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2334 |     v128_t t02 = wasm_v8x16_shuffle(a.val, b.val, 0,0,0,0,12,13,14,15,28,29,30,31,0,0,0,0);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:45:6: note: expanded from here
+   45 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2336:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2336 |     v128_t t10 = wasm_v8x16_shuffle(t00, c.val, 0,1,2,3,4,5,6,7,16,17,18,19,12,13,14,15);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:48:6: note: expanded from here
+   48 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2337:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2337 |     v128_t t11 = wasm_v8x16_shuffle(t01, c.val, 0,1,2,3,20,21,22,23,8,9,10,11,12,13,14,15);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:51:6: note: expanded from here
+   51 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2338:18: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2338 |     v128_t t12 = wasm_v8x16_shuffle(t02, c.val, 24,25,26,27,4,5,6,7,8,9,10,11,28,29,30,31);
+      |                  ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:54:6: note: expanded from here
+   54 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2371:17: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2371 |     v128_t v0 = wasm_v8x16_shuffle(a.val, b.val, 0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23);
+      |                 ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:57:6: note: expanded from here
+   57 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2372:17: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2372 |     v128_t v1 = wasm_v8x16_shuffle(a.val, c.val, 16,17,18,19,20,21,22,23,8,9,10,11,12,13,14,15);
+      |                 ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:3:6: note: expanded from here
+    3 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2373:17: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2373 |     v128_t v2 = wasm_v8x16_shuffle(b.val, c.val, 8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31);
+      |                 ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:6:6: note: expanded from here
+    6 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2686:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2686 |     return v_int8x16(wasm_v8x16_shuffle(vec.val, vec.val, 0,2,1,3,4,6,5,7,8,10,9,11,12,14,13,15));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:99:6: note: expanded from here
+   99 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2691:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2691 |     return v_int8x16(wasm_v8x16_shuffle(vec.val, vec.val, 0,4,1,5,2,6,3,7,8,12,9,13,10,14,11,15));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:102:6: note: expanded from here
+  102 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2697:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2697 |     return v_int16x8(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,4,5,2,3,6,7,8,9,12,13,10,11,14,15));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:105:6: note: expanded from here
+  105 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2702:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2702 |     return v_int16x8(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,8,9,2,3,10,11,4,5,12,13,6,7,14,15));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:108:6: note: expanded from here
+  108 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2708:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2708 |     return v_int32x4(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,2,3,8,9,10,11,4,5,6,7,12,13,14,15));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:111:6: note: expanded from here
+  111 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2713:24: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2713 |     return v_float32x4(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,2,3,8,9,10,11,4,5,6,7,12,13,14,15));
+      |                        ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:114:6: note: expanded from here
+  114 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2718:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2718 |     return v_int8x16(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,2,4,5,6,8,9,10,12,13,14,16,16,16,16));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:117:6: note: expanded from here
+  117 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/video/src/variational_refinement.cpp:44:
+In file included from /home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin.hpp:236:
+/home/runner/work/spood-stacker/spood-stacker/opencv/modules/core/include/opencv2/core/hal/intrin_wasm.hpp:2724:22: warning: 'wasm_v8x16_shuffle' is deprecated: use 'wasm_i8x16_shuffle' instead [-W#pragma-messages]
+ 2724 |     return v_int16x8(wasm_v8x16_shuffle(vec.val, vec.val, 0,1,2,3,4,5,8,9,10,11,12,13,14,15,6,7));
+      |                      ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1746:3: note: expanded from macro 'wasm_v8x16_shuffle'
+ 1746 |   __DEPRECATED_WASM_MACRO("wasm_v8x16_shuffle", "wasm_i8x16_shuffle")          \
+      |   ^
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/lib/clang/19/include/wasm_simd128.h:1687:3: note: expanded from macro '__DEPRECATED_WASM_MACRO'
+ 1687 |   _Pragma(__WASM_STR(GCC warning(                                              \
+      |   ^
+<scratch space>:2:6: note: expanded from here
+    2 |  GCC warning( "'" "wasm_v8x16_shuffle" "' is deprecated: use '" "wasm_i8x16_shuffle" "' instead")
+      |      ^
+em++: warning: linker setting ignored during compilation: 'WASM' [-Wunused-command-line-argument]
+em++: warning: linker setting ignored during compilation: 'SINGLE_FILE' [-Wunused-command-line-argument]
+em++: warning: linker setting ignored during compilation: 'EXPORTED_FUNCTIONS' [-Wunused-command-line-argument]
+183 warnings generated.
+[ 98%] Linking CXX static library ../../lib/libopencv_video.a
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/video && /usr/local/bin/cmake -P CMakeFiles/opencv_video.dir/cmake_clean_target.cmake
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/video && /usr/local/bin/cmake -E cmake_link_script CMakeFiles/opencv_video.dir/link.txt --verbose=1
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/emar qc ../../lib/libopencv_video.a CMakeFiles/opencv_video.dir/src/bgfg_KNN.cpp.o CMakeFiles/opencv_video.dir/src/bgfg_gaussmix2.cpp.o CMakeFiles/opencv_video.dir/src/camshift.cpp.o CMakeFiles/opencv_video.dir/src/dis_flow.cpp.o CMakeFiles/opencv_video.dir/src/ecc.cpp.o CMakeFiles/opencv_video.dir/src/kalman.cpp.o CMakeFiles/opencv_video.dir/src/lkpyramid.cpp.o CMakeFiles/opencv_video.dir/src/optflowgf.cpp.o CMakeFiles/opencv_video.dir/src/optical_flow_io.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_feature.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_feature_set.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_mil_model.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_mil_state.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_model.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_sampler.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_sampler_algorithm.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracker_state_estimator.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracking_feature.cpp.o CMakeFiles/opencv_video.dir/src/tracking/detail/tracking_online_mil.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker_dasiamrpn.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker_goturn.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker_mil.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker_nano.cpp.o CMakeFiles/opencv_video.dir/src/tracking/tracker_vit.cpp.o CMakeFiles/opencv_video.dir/src/variational_refinement.cpp.o CMakeFiles/opencv_video.dir/opencl_kernels_video.cpp.o
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/emranlib ../../lib/libopencv_video.a
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[ 98%] Built target opencv_video
+[ 98%] Linking CXX static library ../../lib/libopencv_objdetect.a
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/objdetect && /usr/local/bin/cmake -P CMakeFiles/opencv_objdetect.dir/cmake_clean_target.cmake
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/objdetect && /usr/local/bin/cmake -E cmake_link_script CMakeFiles/opencv_objdetect.dir/link.txt --verbose=1
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/emar qc ../../lib/libopencv_objdetect.a CMakeFiles/opencv_objdetect.dir/src/aruco/apriltag/apriltag_quad_thresh.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/apriltag/zmaxheap.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/aruco_board.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/aruco_detector.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/aruco_dictionary.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/aruco_utils.cpp.o CMakeFiles/opencv_objdetect.dir/src/aruco/charuco_detector.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/abs_decoder.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/common/hybrid_binarizer.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/common/super_scale.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/common/utils.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/ean13_decoder.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/ean8_decoder.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_decoder/upcean_decoder.cpp.o CMakeFiles/opencv_objdetect.dir/src/barcode_detector/bardetect.cpp.o CMakeFiles/opencv_objdetect.dir/src/cascadedetect.cpp.o CMakeFiles/opencv_objdetect.dir/src/cascadedetect_convert.cpp.o CMakeFiles/opencv_objdetect.dir/src/detection_based_tracker.cpp.o CMakeFiles/opencv_objdetect.dir/src/face_detect.cpp.o CMakeFiles/opencv_objdetect.dir/src/face_recognize.cpp.o CMakeFiles/opencv_objdetect.dir/src/graphical_code_detector.cpp.o CMakeFiles/opencv_objdetect.dir/src/hog.cpp.o CMakeFiles/opencv_objdetect.dir/src/main.cpp.o CMakeFiles/opencv_objdetect.dir/src/qrcode.cpp.o CMakeFiles/opencv_objdetect.dir/src/qrcode_encoder.cpp.o CMakeFiles/opencv_objdetect.dir/opencl_kernels_objdetect.cpp.o
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/emranlib ../../lib/libopencv_objdetect.a
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[ 98%] Built target opencv_objdetect
+make  -f modules/js/CMakeFiles/opencv_js.dir/build.make modules/js/CMakeFiles/opencv_js.dir/depend
+make[3]: Entering directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+cd /home/runner/work/spood-stacker/spood-stacker/build_js && /usr/local/bin/cmake -E cmake_depends "Unix Makefiles" /home/runner/work/spood-stacker/spood-stacker/opencv /home/runner/work/spood-stacker/spood-stacker/opencv/modules/js /home/runner/work/spood-stacker/spood-stacker/build_js /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js/CMakeFiles/opencv_js.dir/DependInfo.cmake "--color="
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+make  -f modules/js/CMakeFiles/opencv_js.dir/build.make modules/js/CMakeFiles/opencv_js.dir/build
+make[3]: Entering directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[ 98%] Building CXX object modules/js/CMakeFiles/opencv_js.dir/__/js_bindings_generator/gen/bindings.cpp.o
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js && /home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/em++ -D_USE_MATH_DEFINES -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS @CMakeFiles/opencv_js.dir/includes_CXX.rsp -s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s EXPORTED_FUNCTIONS="['_malloc', '_free']"   -fsigned-char -W -Wall -Wreturn-type -Wnon-virtual-dtor -Waddress -Wsequence-point -Wformat -Wformat-security -Wmissing-declarations -Wmissing-prototypes -Wstrict-prototypes -Wundef -Winit-self -Wpointer-arith -Wshadow -Wsign-promo -Wuninitialized -Winconsistent-missing-override -Wno-delete-non-virtual-dtor -Wno-unnamed-type-template-args -Wno-comment -Wno-deprecated-enum-enum-conversion -Wno-deprecated-anon-enum-enum-conversion -fdiagnostics-show-option -Qunused-arguments -ffunction-sections -fdata-sections  -fvisibility=hidden -fvisibility-inlines-hidden -O3 -DNDEBUG  -DNDEBUG -std=c++11   -std=c++11  -Wno-missing-prototypes -MD -MT modules/js/CMakeFiles/opencv_js.dir/__/js_bindings_generator/gen/bindings.cpp.o -MF CMakeFiles/opencv_js.dir/__/js_bindings_generator/gen/bindings.cpp.o.d -o CMakeFiles/opencv_js.dir/__/js_bindings_generator/gen/bindings.cpp.o -c /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp
+em++: warning: linker setting ignored during compilation: 'WASM' [-Wunused-command-line-argument]
+em++: warning: linker setting ignored during compilation: 'SINGLE_FILE' [-Wunused-command-line-argument]
+em++: warning: linker setting ignored during compilation: 'EXPORTED_FUNCTIONS' [-Wunused-command-line-argument]
+/home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp:3772:90: warning: duplicate 'const' declaration specifier [-Wduplicate-decl-specifier]
+ 3772 |     Mat aruco_Dictionary_getBitsFromByteList_wrapper(cv::aruco::Dictionary& arg0 , const const cv::Mat&& arg1, int arg2) {
+      |                                                                                          ^~~~~
+/home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp:3776:90: warning: duplicate 'const' declaration specifier [-Wduplicate-decl-specifier]
+ 3776 |     Mat aruco_Dictionary_getByteListFromBits_wrapper(cv::aruco::Dictionary& arg0 , const const cv::Mat&& arg1) {
+      |                                                                                          ^~~~~
+/home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp:5381:28: warning: duplicate 'const' declaration specifier [-Wduplicate-decl-specifier]
+ 5381 |         .constructor<const const cv::Mat&&, int, int>()
+      |                            ^~~~~
+/home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp:5384:97: warning: duplicate 'const' declaration specifier [-Wduplicate-decl-specifier]
+ 5384 |         .class_function("getBitsFromByteList", select_overload<Mat(cv::aruco::Dictionary&,const const cv::Mat&&,int)>(&Wrappers::aruco_Dictionary_getBitsFromByteList_wrapper))
+      |                                                                                                 ^~~~~
+/home/runner/work/spood-stacker/spood-stacker/build_js/modules/js_bindings_generator/gen/bindings.cpp:5385:97: warning: duplicate 'const' declaration specifier [-Wduplicate-decl-specifier]
+ 5385 |         .class_function("getByteListFromBits", select_overload<Mat(cv::aruco::Dictionary&,const const cv::Mat&&)>(&Wrappers::aruco_Dictionary_getByteListFromBits_wrapper))
+      |                                                                                                 ^~~~~
+5 warnings generated.
+[100%] Linking CXX executable ../../bin/opencv_js.js
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js && /usr/local/bin/cmake -E cmake_link_script CMakeFiles/opencv_js.dir/link.txt --verbose=1
+em++: warning: DEMANGLE_SUPPORT is deprecated (mangled names no longer appear in stack traces). Please open a bug if you have a continuing need for this setting [-Wdeprecated]
+cache:INFO: generating system asset: symbol_lists/35fc0e2711315390b814d5f1837dca13b41ace47.json... (this will be cached in "/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/cache/symbol_lists/35fc0e2711315390b814d5f1837dca13b41ace47.json" for subsequent builds)
+cache:INFO:  - ok
+warning: JS library symbol '$demangle' is deprecated. Please open a bug if you have a continuing need for this symbol [-Wdeprecated]
+warning: JS library symbol '$stackTrace' is deprecated. Please open a bug if you have a continuing need for this symbol [-Wdeprecated]
+em++: warning: warnings in JS library compilation [-Wjs-compiler]
+/home/runner/work/_temp/50380d32-122d-49e4-bd9a-8539501d7d16/emsdk-main/upstream/emscripten/em++ -s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s EXPORTED_FUNCTIONS="['_malloc', '_free']"   -fsigned-char -W -Wall -Wreturn-type -Wnon-virtual-dtor -Waddress -Wsequence-point -Wformat -Wformat-security -Wmissing-declarations -Wmissing-prototypes -Wstrict-prototypes -Wundef -Winit-self -Wpointer-arith -Wshadow -Wsign-promo -Wuninitialized -Winconsistent-missing-override -Wno-delete-non-virtual-dtor -Wno-unnamed-type-template-args -Wno-comment -Wno-deprecated-enum-enum-conversion -Wno-deprecated-anon-enum-enum-conversion -fdiagnostics-show-option -Qunused-arguments -ffunction-sections -fdata-sections  -fvisibility=hidden -fvisibility-inlines-hidden -O3 -DNDEBUG  -DNDEBUG   -Wl,--gc-sections  -s TOTAL_MEMORY=128MB -s MAXIMUM_MEMORY=4GB -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_NAME="'cv'" -s DEMANGLE_SUPPORT=1 -s FORCE_FILESYSTEM=1 --use-preload-plugins --bind --post-js /home/runner/work/spood-stacker/spood-stacker/opencv/modules/js/src/helpers.js  -Wno-missing-prototypes @CMakeFiles/opencv_js.dir/objects1.rsp -o ../../bin/opencv_js.js @CMakeFiles/opencv_js.dir/linkLibs.rsp
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js && /usr/local/bin/cmake -E copy /home/runner/work/spood-stacker/spood-stacker/opencv/modules/js/src/loader.js /home/runner/work/spood-stacker/spood-stacker/build_js/bin/loader.js
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[100%] Built target opencv_js
+make  -f modules/js/CMakeFiles/opencv.js.dir/build.make modules/js/CMakeFiles/opencv.js.dir/depend
+make[3]: Entering directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+cd /home/runner/work/spood-stacker/spood-stacker/build_js && /usr/local/bin/cmake -E cmake_depends "Unix Makefiles" /home/runner/work/spood-stacker/spood-stacker/opencv /home/runner/work/spood-stacker/spood-stacker/opencv/modules/js /home/runner/work/spood-stacker/spood-stacker/build_js /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js/CMakeFiles/opencv.js.dir/DependInfo.cmake "--color="
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+make  -f modules/js/CMakeFiles/opencv.js.dir/build.make modules/js/CMakeFiles/opencv.js.dir/build
+make[3]: Entering directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[100%] Generating ../../bin/opencv.js
+cd /home/runner/work/spood-stacker/spood-stacker/build_js/modules/js && /usr/bin/python3 /home/runner/work/spood-stacker/spood-stacker/opencv/modules/js/src/make_umd.py /home/runner/work/spood-stacker/spood-stacker/build_js/bin/opencv_js.js /home/runner/work/spood-stacker/spood-stacker/build_js/bin/opencv.js
+make[3]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+[100%] Built target opencv.js
+make[2]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
+/usr/local/bin/cmake -E cmake_progress_start /home/runner/work/spood-stacker/spood-stacker/build_js/CMakeFiles 0
+make[1]: Leaving directory '/home/runner/work/spood-stacker/spood-stacker/build_js'
 =====
-===== Config OpenCV.js build for wasm
+===== Build finished
 =====
-Executing: ['cmake', '-DPYTHON_DEFAULT_EXECUTABLE=/usr/bin/python3', '-DENABLE_PIC=FALSE', '-DCMAKE_BUILD_TYPE=Release', "-DCPU_BASELINE=''", '-DCMAKE_INSTALL_PREFIX=/usr/local', "-DCPU_DISPATCH=''", '-DCV_TRACE=OFF', '-DBUILD_SHARED_LIBS=OFF', '-DWITH_1394=OFF', '-DWITH_ADE=OFF', '-DWITH_VTK=OFF', '-DWITH_EIGEN=OFF', '-DWITH_FFMPEG=OFF', '-DWITH_GSTREAMER=OFF', '-DWITH_GTK=OFF', '-DWITH_GTK_2_X=OFF', '-DWITH_IPP=OFF', '-DWITH_JASPER=OFF', '-DWITH_JPEG=OFF', '-DWITH_WEBP=OFF', '-DWITH_OPENEXR=OFF', '-DWITH_OPENGL=OFF', '-DWITH_OPENVX=OFF', '-DWITH_OPENNI=OFF', '-DWITH_OPENNI2=OFF', '-DWITH_PNG=OFF', '-DWITH_TBB=OFF', '-DWITH_TIFF=OFF', '-DWITH_V4L=OFF', '-DWITH_OPENCL=OFF', '-DWITH_OPENCL_SVM=OFF', '-DWITH_OPENCLAMDFFT=OFF', '-DWITH_OPENCLAMDBLAS=OFF', '-DWITH_GPHOTO2=OFF', '-DWITH_LAPACK=OFF', '-DWITH_ITT=OFF', '-DWITH_QUIRC=OFF', '-DBUILD_ZLIB=ON', '-DBUILD_opencv_apps=OFF', '-DBUILD_opencv_calib3d=ON', '-DBUILD_opencv_dnn=ON', '-DBUILD_opencv_features2d=ON', '-DBUILD_opencv_flann=ON', '-DBUILD_opencv_gapi=OFF', '-DBUILD_opencv_ml=OFF', '-DBUILD_opencv_photo=ON', '-DBUILD_opencv_imgcodecs=OFF', '-DBUILD_opencv_shape=OFF', '-DBUILD_opencv_videoio=OFF', '-DBUILD_opencv_videostab=OFF', '-DBUILD_opencv_highgui=OFF', '-DBUILD_opencv_superres=OFF', '-DBUILD_opencv_stitching=OFF', '-DBUILD_opencv_java=OFF', '-DBUILD_opencv_js=ON', '-DBUILD_opencv_python2=OFF', '-DBUILD_opencv_python3=OFF', '-DBUILD_EXAMPLES=ON', '-DBUILD_PACKAGE=OFF', '-DBUILD_TESTS=ON', '-DBUILD_PERF_TESTS=ON', "-DCMAKE_TOOLCHAIN_FILE='/home/runner/work/_temp/9141ea50-01c5-4339-948a-232e0c27d6b6/emsdk-main/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake'", '-DBUILD_DOCS=OFF', '-DWITH_PTHREADS_PF=OFF', '-DCV_ENABLE_INTRINSICS=ON', '-DBUILD_WASM_INTRIN_TESTS=OFF', '-DCMAKE_C_FLAGS=\'-s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s MAXIMUM_MEMORY=4GB -O3-s EXPORTED_FUNCTIONS="[\'_malloc\', \'_free\']"\'', '-DCMAKE_CXX_FLAGS=\'-s WASM=1 -s SINGLE_FILE=1 -s USE_PTHREADS=0 -msimd128 -s MAXIMUM_MEMORY=4GB -O3-s EXPORTED_FUNCTIONS="[\'_malloc\', \'_free\']"\'', '/home/runner/work/spood-stacker/spood-stacker/opencv']
-Re-run cmake no build system arguments
-CMake Deprecation Warning at CMakeLists.txt:25 (cmake_minimum_required):
-  Compatibility with CMake < 3.10 will be removed from a future version of
-  CMake.
-
-  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
-  to tell CMake that the project requires at least <min> but has been updated
-  to work with policies introduced by <max> or earlier.
-
-
-CMake Warning (dev) at CMakeLists.txt:127 (enable_language):
-  project() should be called prior to this enable_language() call.
-This warning is for project developers.  Use -Wno-dev to suppress it.
-
--- Detected processor: x86
--- Found PythonInterp: /usr/bin/python3 (found suitable version "3.12.3", minimum required is "3.2")
--- Could NOT find PythonLibs (missing: PYTHON_LIBRARIES PYTHON_INCLUDE_DIRS) (Required is at least version "3.12")
--- Cannot probe for Python/Numpy support (because we are cross-compiling OpenCV)
--- If you want to enable Python/Numpy support, set the following variables:
---   PYTHON2_INCLUDE_PATH
---   PYTHON2_LIBRARIES (optional on Unix-like systems)
---   PYTHON2_NUMPY_INCLUDE_DIRS
---   PYTHON3_INCLUDE_PATH
---   PYTHON3_LIBRARIES (optional on Unix-like systems)
---   PYTHON3_NUMPY_INCLUDE_DIRS
--- Looking for ccache - not found
--- Performing Test HAVE_CXX_FSIGNED_CHAR
--- Performing Test HAVE_CXX_FSIGNED_CHAR - Failed
--- Performing Test HAVE_C_FSIGNED_CHAR
--- Performing Test HAVE_C_FSIGNED_CHAR - Failed
--- Performing Test HAVE_CXX_W
--- Performing Test HAVE_CXX_W - Failed
--- Performing Test HAVE_C_W
--- Performing Test HAVE_C_W - Failed
--- Performing Test HAVE_CXX_WALL
--- Performing Test HAVE_CXX_WALL - Failed
--- Performing Test HAVE_C_WALL
--- Performing Test HAVE_C_WALL - Failed
--- Performing Test HAVE_CXX_WRETURN_TYPE
--- Performing Test HAVE_CXX_WRETURN_TYPE - Failed
--- Performing Test HAVE_C_WRETURN_TYPE
--- Performing Test HAVE_C_WRETURN_TYPE - Failed
--- Performing Test HAVE_CXX_WNON_VIRTUAL_DTOR
--- Performing Test HAVE_CXX_WNON_VIRTUAL_DTOR - Failed
--- Performing Test HAVE_C_WNON_VIRTUAL_DTOR
--- Performing Test HAVE_C_WNON_VIRTUAL_DTOR - Failed
--- Performing Test HAVE_CXX_WADDRESS
--- Performing Test HAVE_CXX_WADDRESS - Failed
--- Performing Test HAVE_C_WADDRESS
--- Performing Test HAVE_C_WADDRESS - Failed
--- Performing Test HAVE_CXX_WSEQUENCE_POINT
--- Performing Test HAVE_CXX_WSEQUENCE_POINT - Failed
--- Performing Test HAVE_C_WSEQUENCE_POINT
--- Performing Test HAVE_C_WSEQUENCE_POINT - Failed
--- Performing Test HAVE_CXX_WFORMAT
--- Performing Test HAVE_CXX_WFORMAT - Failed
--- Performing Test HAVE_C_WFORMAT
--- Performing Test HAVE_C_WFORMAT - Failed
--- Performing Test HAVE_CXX_WFORMAT_SECURITY
--- Performing Test HAVE_CXX_WFORMAT_SECURITY - Failed
--- Performing Test HAVE_C_WFORMAT_SECURITY
--- Performing Test HAVE_C_WFORMAT_SECURITY - Failed
--- Performing Test HAVE_CXX_WMISSING_DECLARATIONS
--- Performing Test HAVE_CXX_WMISSING_DECLARATIONS - Failed
--- Performing Test HAVE_C_WMISSING_DECLARATIONS
--- Performing Test HAVE_C_WMISSING_DECLARATIONS - Failed
--- Performing Test HAVE_CXX_WMISSING_PROTOTYPES
--- Performing Test HAVE_CXX_WMISSING_PROTOTYPES - Failed
--- Performing Test HAVE_C_WMISSING_PROTOTYPES
--- Performing Test HAVE_C_WMISSING_PROTOTYPES - Failed
--- Performing Test HAVE_CXX_WSTRICT_PROTOTYPES
--- Performing Test HAVE_CXX_WSTRICT_PROTOTYPES - Failed
--- Performing Test HAVE_C_WSTRICT_PROTOTYPES
--- Performing Test HAVE_C_WSTRICT_PROTOTYPES - Failed
--- Performing Test HAVE_CXX_WUNDEF
--- Performing Test HAVE_CXX_WUNDEF - Failed
--- Performing Test HAVE_C_WUNDEF
--- Performing Test HAVE_C_WUNDEF - Failed
--- Performing Test HAVE_CXX_WINIT_SELF
--- Performing Test HAVE_CXX_WINIT_SELF - Failed
--- Performing Test HAVE_C_WINIT_SELF
--- Performing Test HAVE_C_WINIT_SELF - Failed
--- Performing Test HAVE_CXX_WPOINTER_ARITH
--- Performing Test HAVE_CXX_WPOINTER_ARITH - Failed
--- Performing Test HAVE_C_WPOINTER_ARITH
--- Performing Test HAVE_C_WPOINTER_ARITH - Failed
--- Performing Test HAVE_CXX_WSHADOW
--- Performing Test HAVE_CXX_WSHADOW - Failed
--- Performing Test HAVE_C_WSHADOW
--- Performing Test HAVE_C_WSHADOW - Failed
--- Performing Test HAVE_CXX_WSIGN_PROMO
--- Performing Test HAVE_CXX_WSIGN_PROMO - Failed
--- Performing Test HAVE_C_WSIGN_PROMO
--- Performing Test HAVE_C_WSIGN_PROMO - Failed
--- Performing Test HAVE_CXX_WUNINITIALIZED
--- Performing Test HAVE_CXX_WUNINITIALIZED - Failed
--- Performing Test HAVE_C_WUNINITIALIZED
--- Performing Test HAVE_C_WUNINITIALIZED - Failed
--- Performing Test HAVE_CXX_WINCONSISTENT_MISSING_OVERRIDE
--- Performing Test HAVE_CXX_WINCONSISTENT_MISSING_OVERRIDE - Failed
--- Performing Test HAVE_C_WINCONSISTENT_MISSING_OVERRIDE
--- Performing Test HAVE_C_WINCONSISTENT_MISSING_OVERRIDE - Failed
--- Performing Test HAVE_CXX_WNO_DELETE_NON_VIRTUAL_DTOR
--- Performing Test HAVE_CXX_WNO_DELETE_NON_VIRTUAL_DTOR - Failed
--- Performing Test HAVE_C_WNO_DELETE_NON_VIRTUAL_DTOR
--- Performing Test HAVE_C_WNO_DELETE_NON_VIRTUAL_DTOR - Failed
--- Performing Test HAVE_CXX_WNO_UNNAMED_TYPE_TEMPLATE_ARGS
--- Performing Test HAVE_CXX_WNO_UNNAMED_TYPE_TEMPLATE_ARGS - Failed
--- Performing Test HAVE_C_WNO_UNNAMED_TYPE_TEMPLATE_ARGS
--- Performing Test HAVE_C_WNO_UNNAMED_TYPE_TEMPLATE_ARGS - Failed
--- Performing Test HAVE_CXX_WNO_COMMENT
--- Performing Test HAVE_CXX_WNO_COMMENT - Failed
--- Performing Test HAVE_C_WNO_COMMENT
--- Performing Test HAVE_C_WNO_COMMENT - Failed
--- Performing Test HAVE_CXX_WNO_DEPRECATED_ENUM_ENUM_CONVERSION
--- Performing Test HAVE_CXX_WNO_DEPRECATED_ENUM_ENUM_CONVERSION - Failed
--- Performing Test HAVE_C_WNO_DEPRECATED_ENUM_ENUM_CONVERSION
--- Performing Test HAVE_C_WNO_DEPRECATED_ENUM_ENUM_CONVERSION - Failed
--- Performing Test HAVE_CXX_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION
--- Performing Test HAVE_CXX_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION - Failed
--- Performing Test HAVE_C_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION
--- Performing Test HAVE_C_WNO_DEPRECATED_ANON_ENUM_ENUM_CONVERSION - Failed
--- Performing Test HAVE_CXX_FDIAGNOSTICS_SHOW_OPTION
--- Performing Test HAVE_CXX_FDIAGNOSTICS_SHOW_OPTION - Failed
--- Performing Test HAVE_C_FDIAGNOSTICS_SHOW_OPTION
--- Performing Test HAVE_C_FDIAGNOSTICS_SHOW_OPTION - Failed
--- Performing Test HAVE_CXX_QUNUSED_ARGUMENTS
--- Performing Test HAVE_CXX_QUNUSED_ARGUMENTS - Failed
--- Performing Test HAVE_C_QUNUSED_ARGUMENTS
--- Performing Test HAVE_C_QUNUSED_ARGUMENTS - Failed
--- Performing Test HAVE_CXX_FFUNCTION_SECTIONS
--- Performing Test HAVE_CXX_FFUNCTION_SECTIONS - Failed
--- Performing Test HAVE_C_FFUNCTION_SECTIONS
--- Performing Test HAVE_C_FFUNCTION_SECTIONS - Failed
--- Performing Test HAVE_CXX_FDATA_SECTIONS
--- Performing Test HAVE_CXX_FDATA_SECTIONS - Failed
--- Performing Test HAVE_C_FDATA_SECTIONS
--- Performing Test HAVE_C_FDATA_SECTIONS - Failed
--- Performing Test HAVE_CPU_BASELINE_FLAGS
--- Performing Test HAVE_CPU_BASELINE_FLAGS - Failed
-CMake Error at cmake/OpenCVCompilerOptimizations.cmake:654 (message):
-  Compiler doesn't support baseline optimization flags:
-Call Stack (most recent call first):
-  cmake/OpenCVCompilerOptions.cmake:338 (ocv_compiler_optimization_options)
-  CMakeLists.txt:681 (include)
-
-
--- Configuring incomplete, errors occurred!
+OpenCV.js location: /home/runner/work/spood-stacker/spood-stacker/build_js/bin/opencv.js
 -----------------------------------------------------------
 options.opencv_dir: /home/runner/work/spood-stacker/spood-stacker/opencv
-Traceback (most recent call last):
-  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 296, in <module>
-    builder.config()
-  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 204, in config
-    execute(cmd)
-  File "/home/runner/work/spood-stacker/spood-stacker/opencv/platforms/js/build_js.py", line 23, in execute
-    raise Fail("Child returned: %s" % retcode)
-Fail: Child returned: 1

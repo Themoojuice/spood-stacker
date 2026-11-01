@@ -1,1 +1,1 @@
-build failed
+-rw-r--r-- 1 runner runner 13059143 Nov  1 18:12 vendor/opencv-4.10.0-simd.js
