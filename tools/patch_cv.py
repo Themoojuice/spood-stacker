@@ -1,4 +1,5 @@
-"""Make OpenCV.js builds with a raised WASM memory ceiling.
+"""Make OpenCV.js builds with a raised WASM memory ceiling (vendor/opencv-4.10.0-2g.js was made
+   from @techstark/opencv-js 4.10.0 with: patch_cv.py opencv.js opencv-4.10.0-2g.js 2047).
    usage: patch_cv.py <in opencv.js> <out.js> <max MiB> [exact]
    exact: grow the heap to exactly what is requested (rounded to 16 MiB), for measuring peak demand."""
 import re, base64, sys
@@ -39,8 +40,9 @@ while p < len(b):
 assert done
 lim = pages * 65536
 src = src[:m.start(1)] + base64.b64encode(bytes(b)).decode() + src[m.end(1):]
-n1 = src.count('"maximum":1073741824/WASM_PAGE_SIZE'); src = src.replace('"maximum":1073741824/WASM_PAGE_SIZE', f'"maximum":{lim}/WASM_PAGE_SIZE')
-n2 = src.count('newSize=Math.min(newSize,1073741824)'); src = src.replace('newSize=Math.min(newSize,1073741824)', f'newSize=Math.min(newSize,{lim})')
+# the same ceiling in the JS wrapper (whatever it was set to before)
+src, n1 = re.subn(r'"maximum":\d+/WASM_PAGE_SIZE', f'"maximum":{lim}/WASM_PAGE_SIZE', src)
+src, n2 = re.subn(r'newSize=Math\.min\(newSize,\d+\)', f'newSize=Math.min(newSize,{lim})', src)
 assert n1 == 1 and n2 == 1, (n1, n2)
 if exact:
     old = 'var newSize=Math.max(oldSize,MIN_TOTAL_MEMORY);while(newSize<requestedSize){if(newSize<=536870912){newSize=alignUp(2*newSize,PAGE_MULTIPLE)}else{newSize=Math.min(alignUp((3*newSize+2147483648)/4,PAGE_MULTIPLE),LIMIT)}}'

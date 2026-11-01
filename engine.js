@@ -23,34 +23,61 @@
   }
 
   /* ---------- memory: how big a stack fits ----------
-     OpenCV.js keeps everything in one WebAssembly heap, which this build caps at 1 GiB however
-     much memory the phone has. Big per-photo images wait outside it (park/unpark), so what is
-     left grows with the working size and, more slowly, with the number of photos. The figures
-     are measured peaks (tools/memprobe.js) with a margin. */
-  const HEAP_CAP_MIB = 1024;
-  /** Peak heap need in MiB for n photos at W x H. */
-  function heapNeedMiB(n, W, H) {
-    const mp = W * H / 1e6;
-    return 155 + mp * (29.2 + 1.2 * n);                    // measured: 26 x 12 MP -> 880, 26 x 4.3 MP -> 416
+     OpenCV.js keeps everything in one WebAssembly heap with a hard ceiling (2 GiB in the build the
+     app ships, vendor/opencv-4.10.0-2g.js), however much memory the phone has. Big per-photo images
+     wait outside it (park/unpark), and the merge works a strip of rows at a time, so what is left
+     grows with the working size and, more slowly, with the number of photos. The figures are
+     measured peaks (tools/memprobe.js, exact-growth build) per stage, in MiB. */
+  const HEAP_CAP_MIB = 2047;
+  const STRIP_CTX = 512;                                  // rows of context a strip carries (256 each side)
+  /** Peak heap need in MiB, before the merge, for n photos at W x H. */
+  function stagesNeedMiB(n, W, H) {
+    const mp = W * H / 1e6, g1600 = 7.3 * Math.min(1, mp / 1.92);   // one <= 1600 px float grey
+    const read = 4 + n * g1600 + 10.5 * mp;               // 26 x 12 MP: 320; 10 x 12 MP: 208
+    const order = 190 + n * 1.07 * g1600;                 // 26 x 12 MP: 400; 10 x 12 MP: 272
+    const align = 380 + 10 * mp;                          // 12 MP: 496; 4.3 MP: 416
+    const flow = 140 + mp * (30 + 0.25 * n);              // 26 x 12 MP: 576; 10 x 12 MP: 528
+    return Math.max(read, order, align, flow);
+  }
+  /** Peak heap need of the merge with strips of `rows` rows (context included). */
+  function mergeNeedMiB(n, W, H, rows) {
+    const mp = W * H / 1e6, r = Math.min(H, rows);
+    return 30 + 0.24 * n * mp + (n + 42) * W * r / 1048576;   // 26 x 12 MP, 2048 rows: 592; whole frame: 880
+  }
+  /** Strip height for the merge: as tall as fits within what the earlier stages need anyway
+      (taller strips repeat less context work); null = merge the whole frame at once. */
+  function stripRowsFor(n, W, H, roomMiB) {
+    const room = Math.max(roomMiB, stagesNeedMiB(n, W, H));
+    if (mergeNeedMiB(n, W, H, H) <= room) return null;
+    for (let r = Math.floor(Math.min(H + STRIP_CTX, 6144) / 64) * 64; r >= 1024; r -= 64) if (mergeNeedMiB(n, W, H, r) <= room) return r;
+    return 1024;
+  }
+  /** Peak heap need in MiB for n photos at W x H, with the strip height it implies. */
+  function heapNeedMiB(n, W, H, roomMiB = 0) {
+    const stripRows = stripRowsFor(n, W, H, roomMiB);
+    const need = Math.max(stagesNeedMiB(n, W, H), mergeNeedMiB(n, W, H, stripRows || H));
+    return { need: need * 1.06, stripRows };              // 6% for allocator slack
   }
   /** The working size (long side) to stack at: the photos' own size, or opts.maxSide if
-      smaller, stepped down until the memory need fits. native: [{width, height}]. */
+      smaller, stepped down until the memory need fits. native: [{width, height}].
+      opts.lowMemory: a phone with 4 GB or less. */
   function planSize(native, opts = {}) {
     const n = native.length;
     const nativeSide = Math.max(...native.map(d => Math.max(d.width, d.height)));
-    const budget = (opts.lowMemory ? 0.6 : 0.9) * HEAP_CAP_MIB;
+    const budget = Math.min(HEAP_CAP_MIB * 0.9, opts.lowMemory ? 640 : 1400);
     const dims = side => {
       let W = 0, H = 0;
       for (const d of native) { const s = Math.min(1, side / Math.max(d.width, d.height)); W = Math.max(W, Math.round(d.width * s)); H = Math.max(H, Math.round(d.height * s)); }
       return [W, H];
     };
     const want = Math.min(nativeSide, opts.maxSide || Infinity);
-    let side = want, [W, H] = dims(side), need = heapNeedMiB(n, W, H);
-    while (need > budget && side > 1200) {
-      side = Math.max(1200, Math.floor(side * 0.92));
-      [W, H] = dims(side); need = heapNeedMiB(n, W, H);
+    let side = want, [W, H] = dims(side), est = heapNeedMiB(n, W, H);
+    while (est.need > budget && side > 1200) {
+      side = Math.max(1200, Math.floor(side * 0.94));
+      [W, H] = dims(side); est = heapNeedMiB(n, W, H);
     }
-    return { side, width: W, height: H, nativeSide, wanted: want, shrunk: side < want, needMiB: Math.round(need), budgetMiB: Math.round(budget) };
+    return { side, width: W, height: H, nativeSide, wanted: want, shrunk: side < want, stripRows: est.stripRows,
+      needMiB: Math.round(est.need), budgetMiB: Math.round(budget) };
   }
 
   async function run(cv, frames, opts) {
@@ -58,6 +85,7 @@
     const log = [];
     const say = m => { log.push(m); if (opts.onLog) opts.onLog(m); };
     const maxSide = opts.maxSide || 3000;
+    STORE = opts.store || MEM_STORE;
     const n = frames.length;
     if (n < 2) throw new Error('Add at least 2 photos of the same subject.');
     const trash = [];
@@ -152,7 +180,7 @@
     const warped = new Array(n), wmask = new Array(n);
     for (let i = 0; i < n; i++) {
       const M = cv.matFromArray(3, 3, cv.CV_64F, Hs[i]);
-      const src = unpark(cv, rgb[i]); rgb[i] = null;
+      const src = unpark(cv, rgb[i]); STORE.drop(rgb[i].h); rgb[i] = null;
       const wp = new cv.Mat(); cv.warpPerspective(src, wp, M, sz(W, H), cv.INTER_LANCZOS4, cv.BORDER_REFLECT); src.delete();
       warped[i] = park(cv, wp);
       const wm = new cv.Mat(); cv.warpPerspective(masks[i], wm, M, sz(W, H), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
@@ -179,7 +207,7 @@
     // only while one is in use (was a full-size float per photo, 4 bytes a pixel)
     const wg = warped.map(p => { const m = unpark(cv, p), g = gray8(cv, m); m.delete(); return park(cv, g); });
     const F = p => { const m = unpark(cv, p), f = f32(cv, m); m.delete(); return f; };     // float grey of a parked 8-bit grey
-    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data, v => v / 255)), Hs: Hs.map(h => h.slice()) });
+    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(pdata(g), v => v / 255)), Hs: Hs.map(h => h.slice()) });
     const trust = new Array(n).fill(null);
     let refF = F(wg[ref]);
     const refBlur = new cv.Mat(); cv.GaussianBlur(refF, refBlur, sz(0, 0), 6, 6);
@@ -200,10 +228,11 @@
       const nccG = bandNCC(cv, refF, curF, both), nccF = candG ? bandNCC(cv, refF, candG, both) : -1;
       curF.delete();
       if (candG && nccF >= nccG + 0.002) {
-        const wsrc = unpark(cv, warped[cur]);
+        const wsrc = unpark(cv, warped[cur]); STORE.drop(warped[cur].h); STORE.drop(wg[cur].h);
         const cand = remapWith(cv, wsrc, maps, cv.INTER_LANCZOS4); wsrc.delete();
         warped[cur] = park(cv, cand);
         const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); candG.delete(); wg[cur] = park(cv, g8);
+        STORE.drop(wmask[cur].h);
         const mf = new cv.Mat(); wmCur.convertTo(mf, cv.CV_32F);
         const mr = remapWith(cv, mf, maps, cv.INTER_LINEAR); mf.delete();
         const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY); mr.delete();
@@ -225,7 +254,7 @@
     }
     refBlur.delete(); wmRef.delete();
     trust[ref] = new cv.Mat(hh, hw, cv.CV_8U, new cv.Scalar(255));
-    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(g.data, v => v / 255)), trust: trust.map(t => Float32Array.from(t.data, v => v / 255)), hw, hh });
+    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(pdata(g), v => v / 255)), trust: trust.map(t => Float32Array.from(t.data, v => v / 255)), hw, hh });
 
     // ---------- 5. choose which photos to use ----------
     const keep = new Array(n).fill(true), why = new Array(n).fill('');
@@ -324,14 +353,26 @@
         progress(0.65 + 0.03 * (k + 1) / offer.length, 'Keeping photos for retouching');
       }
     }
-    for (const i of left) { warped[i] = wg[i] = wmask[i] = null; usable[i].delete(); }
+    for (const i of left) { STORE.drop(warped[i].h); STORE.drop(wg[i].h); STORE.drop(wmask[i].h); warped[i] = wg[i] = wmask[i] = null; usable[i].delete(); }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
     progress(0.67, 'Merging');
     await tick();
 
     // ---------- 6. hybrid fusion ----------
-    for (const i of idx) wg[i] = null;
+    for (const i of idx) { STORE.drop(wg[i].h); wg[i] = null; }
     const debug = opts.onDebug ? (name, d) => opts.onDebug(name, Object.assign({ photos: idx.map(i => i + 1), box }, d)) : null;
+    let out;
+    if (opts.stripRows && H > opts.stripRows) {
+      // merged and finished a band at a time; then cropped to the box, as RGBA
+      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(0.67 + 0.28 * p, 'Merging'), tick, opts.stripRows);
+      weights.forEach(m => m.delete());
+      const data = new Uint8ClampedArray(box.w * box.h * 4);
+      for (let y = 0; y < box.h; y++) {
+        let q = ((box.y + y) * W + box.x) * 3, d = y * box.w * 4;
+        for (let x = 0; x < box.w; x++, q += 3, d += 4) { data[d] = rgb[q]; data[d + 1] = rgb[q + 1]; data[d + 2] = rgb[q + 2]; data[d + 3] = 255; }
+      }
+      out = { data, width: box.w, height: box.h, log, ref: ref + 1 };
+    } else {
     const fused = await fuseHybrid(cv, keptImgs, weights, keptMask, p => progress(0.67 + 0.28 * p, 'Merging'), tick, debug);
     weights.forEach(m => m.delete());
 
@@ -341,8 +382,10 @@
     const crop = sharp.roi(new cv.Rect(box.x, box.y, box.w, box.h));
     const u8 = new cv.Mat(); crop.convertTo(u8, cv.CV_8U, 255, 0.5); crop.delete(); sharp.delete();
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
-    const out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
+    out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
     rgba.delete();
+    }
+    unparkAll(warped); unparkAll(wmask); unparkAll(wg);
     trash.forEach(m => free(m));
     progress(1, 'Done');
     say(`result ${out.width}×${out.height}`);
@@ -462,8 +505,24 @@
   function f32(cv, g8) { const f = new cv.Mat(); g8.convertTo(f, cv.CV_32F, 1 / 255); return f; }
   // a big image parked outside the WASM heap (which this OpenCV.js build caps at 1 GiB),
   // copied back in only while it is being worked on. In the browser this could be an OPFS file.
-  function park(cv, m) { const p = { rows: m.rows, cols: m.cols, mtype: m.type(), data: new Uint8Array(m.data) }; m.delete(); return p; }
-  function unpark(cv, p) { const m = new cv.Mat(p.rows, p.cols, p.mtype); m.data.set(p.data); return m; }
+  // parked images go through a store: {put(u8) -> h, get(h, off, len) -> u8, set(h, off, u8), drop(h)}.
+  // Memory by default; the probe can pass a disk store (in the browser: an OPFS file).
+  const MEM_STORE = { put: u => u, get: (h, off = 0, len = h.length - off) => h.subarray(off, off + len), set: (h, off, u) => h.set(u, off), drop: () => {} };
+  let STORE = MEM_STORE;
+  function park(cv, m) {
+    const p = { rows: m.rows, cols: m.cols, mtype: m.type(), bpp: m.data.length / (m.rows * m.cols), h: STORE.put(new Uint8Array(m.data)) };
+    m.delete(); return p;
+  }
+  /** rows r0..r1 (default all) of a parked image, as a new Mat */
+  function unpark(cv, p, r0 = 0, r1 = p.rows) {
+    const m = new cv.Mat(r1 - r0, p.cols, p.mtype), row = p.cols * p.bpp, b = p.base || 0;
+    m.data.set(STORE.get(p.h, (b + r0) * row, (r1 - r0) * row)); return m;
+  }
+  /** the parked buffer (or a view's rows); the memory store hands out a view, no copy */
+  function pdata(p) { const row = p.cols * p.bpp; return STORE.get(p.h, (p.base || 0) * row, p.rows * row); }
+  /** rows y0..y1 of a parked image, as a parked image of its own (no copy) */
+  function pview(p, y0, y1) { return Object.assign({}, p, { base: (p.base || 0) + y0, rows: y1 - y0 }); }
+  function unparkAll(list) { for (const p of list) if (p) STORE.drop(p.h); }
 
   function focusMeasure(cv, g, sigma) {
     const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), 0.8, 0.8);
@@ -585,26 +644,30 @@
       nobody does), so pyramids see no false edges at a photo's border.
       Returns, per photo, the share of the reference's view it covers. */
   function fillUncovered(cv, warped, wmask, ref) {
-    const n = warped.length, N = warped[0].rows * warped[0].cols;
-    const sum = new Float32Array(N * 3), cnt = new Uint8Array(N);
-    for (let i = 0; i < n; i++) {
-      const D = warped[i].data, M = wmask[i].data;
-      for (let k = 0, p = 0; k < N; k++, p += 3) if (M[k]) { sum[p] += D[p]; sum[p + 1] += D[p + 1]; sum[p + 2] += D[p + 2]; cnt[k]++; }
-    }
-    const R = warped[ref].data, MR = wmask[ref].data;
-    let refArea = 0; for (let k = 0; k < N; k++) if (MR[k]) refArea++;
-    const share = new Array(n).fill(1);
-    for (let i = 0; i < n; i++) {
-      const D = warped[i].data, M = wmask[i].data;
-      let both = 0;
-      for (let k = 0, p = 0; k < N; k++, p += 3) {
-        if (M[k]) { if (MR[k]) both++; continue; }
-        if (cnt[k]) { const c = cnt[k]; D[p] = sum[p] / c + 0.5; D[p + 1] = sum[p + 1] / c + 0.5; D[p + 2] = sum[p + 2] / c + 0.5; }
-        else if (i !== ref) { D[p] = R[p]; D[p + 1] = R[p + 1]; D[p + 2] = R[p + 2]; }
+    // same as before, a band of rows at a time through the store (works for a disk store too)
+    const n = warped.length, W = warped[0].cols, H = warped[0].rows, BAND = 128;
+    let refArea = 0; const both = new Array(n).fill(0);
+    for (let r0 = 0; r0 < H; r0 += BAND) {
+      const r1 = Math.min(H, r0 + BAND), N = (r1 - r0) * W;
+      const D = warped.map(p => STORE.get(p.h, r0 * W * 3, N * 3)), Mk = wmask.map(p => STORE.get(p.h, r0 * W, N));
+      const sum = new Float32Array(N * 3), cnt = new Uint8Array(N);
+      for (let i = 0; i < n; i++) {
+        const Di = D[i], M = Mk[i];
+        for (let k = 0, q = 0; k < N; k++, q += 3) if (M[k]) { sum[q] += Di[q]; sum[q + 1] += Di[q + 1]; sum[q + 2] += Di[q + 2]; cnt[k]++; }
       }
-      share[i] = refArea ? both / refArea : 1;
+      const R = D[ref], MR = Mk[ref];
+      for (let k = 0; k < N; k++) if (MR[k]) refArea++;
+      for (let i = 0; i < n; i++) {
+        const Di = D[i], M = Mk[i]; let changed = false;
+        for (let k = 0, q = 0; k < N; k++, q += 3) {
+          if (M[k]) { if (MR[k]) both[i]++; continue; }
+          if (cnt[k]) { const c = cnt[k]; Di[q] = sum[q] / c + 0.5; Di[q + 1] = sum[q + 1] / c + 0.5; Di[q + 2] = sum[q + 2] / c + 0.5; changed = true; }
+          else if (i !== ref) { Di[q] = R[q]; Di[q + 1] = R[q + 1]; Di[q + 2] = R[q + 2]; changed = true; }
+        }
+        if (changed) STORE.set(warped[i].h, r0 * W * 3, Di);
+      }
     }
-    return share;
+    return both.map(b => refArea ? b / refArea : 1);
   }
 
   /** A photo's coverage at half size: 1 well inside its own pixels, easing to 0
@@ -1209,7 +1272,8 @@
   /** imgs8: lined-up photos (8-bit RGB). weights: per photo, half size, 0..1 —
       where it may contribute (has pixels, agrees with the reference, can be trusted).
       valid: per photo, full size 8-bit — where it has pixels of its own. */
-  async function fuseHybrid(cv, imgs8, weights, valid, progress, tick, debug) {
+  async function fuseHybrid(cv, imgs8, weights, valid, progress, tick, debug, stats) {
+    // stats = {lo, hi, noise} for the whole frame, when this call merges one strip of it
     const n = imgs8.length, W = imgs8[0].cols, H = imgs8[0].rows;
     // --- weights from relative sharpness, computed at half size (weights are smooth) ---
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2), half = new cv.Size(hw, hh);
@@ -1219,7 +1283,7 @@
       const im = unpark(cv, imgs8[i]), gray = toGray(cv, im); im.delete();
       const f = focusMeasure(cv, gray, 4);
       const s = new cv.Mat(); cv.resize(f, s, half, 0, 0, cv.INTER_AREA); f.delete(); Fh.push(s);
-      const f2 = focusMeasure(cv, gray, 2), T = f2.data32F, V = valid[i].data;
+      const f2 = focusMeasure(cv, gray, 2), T = f2.data32F, V = pdata(valid[i]);
       for (let k = 0; k < T.length; k++) if (V[k] && T[k] > texMax[k]) texMax[k] = T[k];
       f2.delete();
       const gs = new cv.Mat(); cv.resize(gray, gs, half, 0, 0, cv.INTER_AREA); const S = gs.data32F;
@@ -1249,7 +1313,7 @@
     const tex = cv.matFromArray(H, W, cv.CV_32F, texMax);
     const tb = new cv.Mat(); cv.GaussianBlur(tex, tb, new cv.Size(0, 0), 25, 25);
     const sorted = Float32Array.from(texMax.filter((_, k) => k % 7 === 0)).sort();
-    const lo = sorted[Math.floor(sorted.length * .35)], hi = sorted[Math.floor(sorted.length * .65)];
+    const lo = stats ? stats.lo : sorted[Math.floor(sorted.length * .35)], hi = stats ? stats.hi : sorted[Math.floor(sorted.length * .65)];
     const TM = new cv.Mat(H, W, cv.CV_32F), tm = TM.data32F, TB = tb.data32F;
     for (let k = 0; k < tm.length; k++) {
       const t = texMax[k] / (TB[k] + 1e-6);
@@ -1267,7 +1331,7 @@
     const acc = sizes.map(([w, h]) => new Float32Array(w * h * 3));
     const bestE = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h).fill(-1));
     const bestC = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h * 3));
-    const noise = new Array(FINE).fill(Infinity);
+    const noise = stats ? stats.noise.slice() : new Array(FINE).fill(Infinity);
     const ghostPyr = i => {
       const wF = f32(cv, weights[i]), gf = new cv.Mat(); cv.resize(wF, gf, new cv.Size(W, H), 0, 0, cv.INTER_LINEAR); wF.delete();
       return gaussPyr(cv, gf, FINE, true);
@@ -1288,7 +1352,7 @@
           const G = gg[L].data32F, BE = bestE[L], BC = bestC[L];
           // noise of this band: the typical detail where this photo is out of focus
           const smp = []; for (let k = 0, p = 0; k < E.length; k += 37, p += 111) if (G[k] > 0.5) smp.push(Math.abs(C2[p]) + Math.abs(C2[p + 1]) + Math.abs(C2[p + 2]));
-          if (smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
+          if (!stats && smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
           for (let k = 0, p = 0; k < E.length; k++, p += 3) {
             const v = E[k] * G[k];
             if (v > BE[k]) { BE[k] = v; BC[p] = C2[p]; BC[p + 1] = C2[p + 1]; BC[p + 2] = C2[p + 2]; }
@@ -1357,6 +1421,85 @@
     }
     progress(1);
     return img;
+  }
+
+  /** The merge done a band of rows at a time, so its memory follows the band's height, not
+      the frame's. Each strip is merged with 256 rows of context above and below (enough for the
+      fine levels to be exact and the coarse ones nearly so), sharpened, and cross-faded into its
+      neighbour over 256 rows. Thresholds that must be the same everywhere (texture percentiles,
+      band noise) are measured on the whole frame first. Returns the finished 8-bit RGB frame. */
+  async function fuseStrips(cv, imgs8, weights, valid, progress, tick, maxRows) {
+    const n = imgs8.length, W = imgs8[0].cols, H = imgs8[0].rows, OV = 256, CF = 128;
+    const core = Math.max(2 * CF + 64, Math.floor((maxRows - 2 * OV) / 64) * 64);
+    const starts = []; for (let y = 0; y < H; y += core) starts.push(y);
+    const span = s => { const y0 = starts[s], y1 = Math.min(H, y0 + core); return { y0, y1, e0: Math.max(0, y0 - OV), e1: Math.min(H, y1 + OV) }; };
+    const hh = Math.ceil(H / 2), hw = Math.ceil(W / 2);
+    const wcrop = (i, e0, e1) => { const r = weights[i].roi(new cv.Rect(0, e0 / 2, hw, Math.ceil(e1 / 2) - e0 / 2)), c = r.clone(); r.delete(); return c; };
+
+    // --- pre-pass 1: texture thresholds from the sharpest fine detail at every 7th pixel ---
+    const texS = new Float32Array(Math.ceil(W * H / 7));
+    for (let i = 0; i < n; i++) {
+      for (let s = 0; s < starts.length; s++) {
+        const { y0, y1 } = span(s), a = Math.max(0, y0 - 16), b = Math.min(H, y1 + 16);
+        const im = unpark(cv, imgs8[i], a, b), g = toGray(cv, im); im.delete();
+        const f2 = focusMeasure(cv, g, 2), T = f2.data32F; g.delete();
+        const V = STORE.get(valid[i].h, y0 * W, (y1 - y0) * W);
+        for (let y = y0; y < y1; y++) {
+          let k = y * W, k7 = Math.ceil(k / 7) * 7;                   // global index, multiples of 7 only
+          const rowEnd = k + W;
+          for (; k7 < rowEnd; k7 += 7) { const x = k7 - y * W, t = T[(y - a) * W + x]; if (V[(y - y0) * W + x] && t > texS[k7 / 7]) texS[k7 / 7] = t; }
+        }
+        f2.delete();
+      }
+      progress(0.08 * (i + 1) / n); await tick();
+    }
+    const sorted = texS.slice().sort();
+    const lo = sorted[Math.floor(sorted.length * .35)], hi = sorted[Math.floor(sorted.length * .65)];
+    // --- pre-pass 2: each band's noise, from the middle strip (as the whole-frame merge measures it) ---
+    const noise = new Array(FINE).fill(Infinity);
+    { const { e0, e1 } = span(Math.floor(starts.length / 2));
+      for (let i = 0; i < n; i++) {
+        const im = unpark(cv, imgs8[i], e0, e1), f = new cv.Mat(); im.convertTo(f, cv.CV_32FC3, 1 / 255); im.delete();
+        const lp = lapPyr(cv, f, FINE);
+        const wc = wcrop(i, e0, e1), wF = f32(cv, wc); wc.delete();
+        const gf = new cv.Mat(); cv.resize(wF, gf, new cv.Size(W, e1 - e0), 0, 0, cv.INTER_LINEAR); wF.delete();
+        const gg = gaussPyr(cv, gf, FINE, true);
+        for (let L = 0; L < FINE; L++) {
+          const C2 = lp[L].data32F, G = gg[L].data32F, smp = [];
+          for (let k = 0, q = 0; k < G.length; k += 37, q += 111) if (G[k] > 0.5) smp.push(Math.abs(C2[q]) + Math.abs(C2[q + 1]) + Math.abs(C2[q + 2]));
+          if (smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
+        }
+        lp.forEach(m => m.delete()); gg.forEach(m => m.delete());
+        progress(0.08 + 0.04 * (i + 1) / n); await tick();
+      }
+    }
+    // --- the strips ---
+    const out = new Uint8Array(W * H * 3);
+    let pending = null;                                   // the previous strip's rows in the cross-fade zone (float)
+    const to8 = v => { const r = Math.round(v * 255 + 0.5); return r < 0 ? 0 : r > 255 ? 255 : r; };
+    for (let s = 0; s < starts.length; s++) {
+      const { y0, y1, e0, e1 } = span(s), last = s === starts.length - 1;
+      const views = imgs8.map(p => pview(p, e0, e1)), vv = valid.map(p => pview(p, e0, e1));
+      const ws = weights.map((_, i) => wcrop(i, e0, e1));
+      const base = 0.12 + 0.88 * s / starts.length, part = 0.88 / starts.length;
+      const fused = await fuseHybrid(cv, views, ws, vv, p => progress(base + part * p), tick, null, { lo, hi, noise });
+      ws.forEach(m => m.delete());
+      const b = new cv.Mat(); cv.GaussianBlur(fused, b, new cv.Size(0, 0), 1.2, 1.2);
+      cv.addWeighted(fused, 1.35, b, -0.35, 0, b); fused.delete();
+      const S = b.data32F, row = W * 3;
+      const top = s ? y0 - CF : 0, bot = last ? H : y1 - CF;
+      for (let y = top; y < bot; y++) {                      // rows of this strip that are final
+        const src = (y - e0) * row, dst = y * row;
+        if (s && y < y0 + CF) {
+          const w = (y - (y0 - CF) + 0.5) / (2 * CF), P = pending, pr = (y - (y0 - CF)) * row;
+          for (let k = 0; k < row; k++) out[dst + k] = to8(P[pr + k] * (1 - w) + S[src + k] * w);
+        } else for (let k = 0; k < row; k++) out[dst + k] = to8(S[src + k]);
+      }
+      if (!last) pending = Float32Array.from(S.subarray((y1 - CF - e0) * row, (y1 + CF - e0) * row));
+      b.delete();
+    }
+    progress(1);
+    return out;
   }
 
   function normalise(maps, N) {

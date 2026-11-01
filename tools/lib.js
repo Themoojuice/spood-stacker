@@ -16,7 +16,7 @@ function needSharp() {
 let cvPromise = null;
 function loadCv() {
   if (!cvPromise) cvPromise = new Promise(resolve => {
-    const cv = require(path.join(ROOT, 'vendor', 'opencv-4.10.0.js'));
+    const cv = require(path.join(ROOT, 'vendor', 'opencv-4.10.0-2g.js'));
     const fin = c => { try { delete c.then; } catch (e) { /* ignore */ } resolve(c); };
     if (cv.Mat) fin(cv);
     else if (typeof cv.then === 'function') cv.then(fin);
