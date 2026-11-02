@@ -32,6 +32,19 @@
   const HEAP_CAP_MIB = 2047;
   const STRIP_CTX = 512;                                  // rows of context a strip carries (256 each side)
   const STRIP_JS_MIB = 512;                               // the merge's own (JS) buffers for one strip, at most
+  /** Each stage's share of the run time, from measured costs (seconds per photo on a slow
+      2-core machine with the SIMD build; mp = megapixels): at(stage, fraction done) -> 0..1. */
+  function progressPlan(n, W, H, stripRows, retouch) {
+    const mp = W * H / 1e6, strips = stripRows ? stripRows / Math.max(1, stripRows - STRIP_CTX) : 1;
+    const cost = [
+      ['read', n * 0.03 * mp], ['order', n * 0.05], ['align', (n - 1) * 1.3],
+      ['warp', (n - 1) * 0.2 * mp], ['prep', n * 0.012 * mp], ['flow', (n - 1) * (0.55 + 0.13 * mp)],
+      ['select', n * (0.25 + 0.036 * mp)], ['export', retouch ? n * 0.035 * mp : 0], ['merge', n * 0.165 * mp * strips]];
+    const total = cost.reduce((a, c) => a + c[1], 0), span = {};
+    let acc = 0;
+    for (const [k, c] of cost) { span[k] = [acc / total, (acc + c) / total]; acc += c; }
+    return (k, f) => { const [a, b] = span[k]; return a + (b - a) * Math.min(1, Math.max(0, f)); };
+  }
   /** Peak heap need in MiB, before the merge, for n photos at W x H. */
   function stagesNeedMiB(n, W, H) {
     const mp = W * H / 1e6, px = mp * 0.954, g = Math.min(1, mp / 1.92);   // px: MiB per byte a pixel
@@ -106,6 +119,9 @@
     // the full-size grey is needed only here, for two numbers per photo; everything
     // before the warp works at <= 1600 px, so only that copy is kept, as 8-bit
     const pre = Math.min(1, 1600 / Math.max(W, H));
+    // the progress bar moves by each stage's share of the time it takes, so it (and the time
+    // left the app shows) runs evenly
+    const at = progressPlan(n, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame);
     const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
     const rgb = [], gray = [], centreFocus = new Array(n), repeatS = new Array(n);
     // small float copies for the focus order (512 x 384) and the clamp test (~200 px), made from
@@ -144,7 +160,7 @@
       const o = new cv.Mat(); cv.resize(s, o, new cv.Size(512, 384), 0, 0, cv.INTER_AREA); ordSmall.push(o);
       const c = new cv.Mat(); cv.resize(s, c, new cv.Size(cw, ch), 0, 0, cv.INTER_AREA); clampSmall.push(c);
       gray.push(to8(cv, s)); s.delete();
-      progress(0.02 + 0.06 * (i + 1) / n, 'Reading photos');
+      progress(at('read', (i + 1) / n), 'Reading photos');
       await tick();
     }
     say(`${n} photos, working size ${W}×${H}`);
@@ -167,7 +183,7 @@
     const big = Math.max(W, H);
     if (repeating) say('repeating texture in view (a mesh?): lined up from features only');
     say(`focus order ${order.map(o => o + 1).join(' ')}, reference photo ${ref + 1}`);
-    progress(0.12, 'Working out focus order');
+    progress(at('order', 1), 'Working out focus order');
     await tick();
 
     // ---------- 3. global alignment ----------
@@ -193,7 +209,7 @@
         Hs[cur] = r.H; inl[cur] = best; eccOk[cur] = r.ok || !!r.skipped;
         say(`photo ${cur + 1}: ${best} matches${r.skipped ? '' : `, fine-tune ${r.ok ? 'ok' : 'skipped'}`}`);
         prev = cur; pos += dir; done++;
-        progress(0.12 + 0.33 * done / (n - 1), 'Lining up photos');
+        progress(at('align', done / (n - 1)), 'Lining up photos');
         await tick();
       }
     }
@@ -202,6 +218,12 @@
     // only on the line-up, so the bands join exactly)
     const warped = new Array(n), wmask = new Array(n);
     for (let i = 0; i < n; i++) {
+      progress(at('warp', i / n), 'Lining up photos');
+      if (Hs[i].every((v, k) => v === (k % 4 === 0 ? 1 : 0))) {
+        // the reference: warping it would copy it pixel for pixel (Lanczos at whole pixels)
+        warped[i] = rgb[i]; rgb[i] = null; wmask[i] = park(cv, masks[i].clone());
+        continue;
+      }
       const src = unpark(cv, rgb[i]); STORE.drop(rgb[i].h); rgb[i] = null;
       warped[i] = parkEmpty(H, W, cv.CV_8UC3, 3); wmask[i] = parkEmpty(H, W, cv.CV_8U, 1);
       for (let y0 = 0; y0 < H; y0 += BAND) {
@@ -220,7 +242,9 @@
     // A photo framed differently covers only part of the reference's view. Where it
     // has no pixels of its own it is filled from the photos that do, so its pyramid
     // has no false edges there; its weight is zero there (coverage maps, below).
+    progress(at('prep', 0), 'Correcting movement');
     const covShare = fillUncovered(cv, warped, wmask, ref);
+    progress(at('prep', 0.35), 'Correcting movement');
     covShare.forEach((c, i) => { if (i !== ref && c < 0.97) say(`photo ${i + 1}: covers ${Math.round(c * 100)}% of the reference's view`); });
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2);
 
@@ -232,7 +256,8 @@
     // agreed with the reference there.
     // greys kept as 8-bit (they come from 8-bit photos anyway); a float copy is made
     // only while one is in use (was a full-size float per photo, 4 bytes a pixel)
-    const wg = warped.map(p => {
+    const wg = warped.map((p, i) => {
+      progress(at('prep', 0.35 + 0.55 * i / n), 'Correcting movement');
       const out = parkEmpty(H, W, cv.CV_8U, 1);
       for (let y0 = 0; y0 < H; y0 += BAND) { const y1 = Math.min(H, y0 + BAND), m = unpark(cv, p, y0, y1), g = gray8(cv, m); m.delete(); parkRows(out, y0, g); g.delete(); }
       return out;
@@ -243,6 +268,7 @@
     // the reference's side of every comparison below, made once (small and half-size copies)
     const refF = F(wg[ref]), rc = refCache(cv, refF, hw, hh); refF.delete();
     const wmRef = unpark(cv, wmask[ref]);
+    progress(at('prep', 1), 'Correcting movement');
     done = 0;
     for (let k = 0; k < n; k++) {
       const cur = order[k];
@@ -290,7 +316,7 @@
       const t8 = new cv.Mat(); fbH.convertTo(t8, cv.CV_8U, 255, 0.5); trust[cur] = park(cv, t8);   // 8-bit, parked
       fbH.delete(); plain.delete();
       both.delete(); wmCur.delete(); done++;
-      progress(0.45 + 0.2 * done / (n - 1), 'Correcting movement');
+      progress(at('flow', done / (n - 1)), 'Correcting movement');
       await tick();
     }
     wmRef.delete();
@@ -320,12 +346,13 @@
     const quarter = m => { const s = new cv.Mat(); cv.resize(m, s, new cv.Size(0, 0), qs, qs, m.type() === cv.CV_8U ? cv.INTER_NEAREST : cv.INTER_AREA); return s; };
     const thumbs = wg.map(g => { const f = F(g), q = quarter(f); f.delete(); return q; }), maskT = wmask.map(p => { const m = unpark(cv, p), q = quarter(m); m.delete(); return q; });
     const sharpT = thumbs.map(t => { const f = focusMeasure(cv, t, 2); const v = cv.mean(f)[0]; f.delete(); return v; });
+    const bandT = thumbs.map(t => nccBand(cv, t, 1));       // as bandNCC does it (thumbnails are <= 1000 px: full size)
     const focusT = thumbs.map(t => focusMeasure(cv, t, 2));
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
       if (!keep[i] || !keep[j]) continue;
       const bothT = new cv.Mat(); cv.bitwise_and(maskT[i], maskT[j], bothT);
       const overlap = cv.countNonZero(bothT) / (bothT.rows * bothT.cols);
-      const c = overlap > 0.3 ? bandNCC(cv, thumbs[i], thumbs[j], bothT) : 0;
+      const c = overlap > 0.3 ? nccScore(bandT[i].data32F, bandT[j].data32F, bothT.data, 3) : 0;
       // same picture AND same focus: with a steady camera, neighbouring focus slices
       // look alike at this size, but they are sharp in different places
       // ...AND same framing: two separate shots at the same focus but framed apart
@@ -337,7 +364,8 @@
       }
       bothT.delete();
     }
-    thumbs.forEach(t => t.delete()); maskT.forEach(t => t.delete()); focusT.forEach(t => t.delete());
+    thumbs.forEach(t => t.delete()); maskT.forEach(t => t.delete()); focusT.forEach(t => t.delete()); bandT.forEach(t => t.delete());
+    progress(at('select', 0.35), 'Choosing photos');
     // (c) photos that disagree with the reference almost everywhere they overlap (subject moved a lot).
     // usable[i]: what each photo may contribute, pixel by pixel (half size): it agrees with
     // the reference there (ghost), has pixels of its own there (coverage, fading to 0 over a
@@ -363,6 +391,7 @@
       const u8 = new cv.Mat(); g.convertTo(u8, cv.CV_8U, 255); g.delete();     // 8-bit (0..1 in 1/255 steps), parked
       usable[i] = park(cv, u8);
       cover.delete();
+      progress(at('select', 0.35 + 0.5 * (i + 1) / n), 'Choosing photos');
     }
     rc.free();
     let idx = [...Array(n).keys()].filter(i => keep[i]);
@@ -377,6 +406,7 @@
     if (opts.onSelection) opts.onSelection({ used: idx.map(i => i + 1), left: left.map(i => ({ photo: i + 1, why: why[i] })) });
     say(`using ${idx.length} of ${n} photos`);
 
+    progress(at('select', 1), 'Choosing photos');
     // crop: everything at least one used photo really saw (not just what all of them saw)
     const seen = unpark(cv, wmask[idx[0]]);
     for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
@@ -393,12 +423,12 @@
         const fr = exportFrame(cv, warped[i], wg[i], uF, box, { photo: i + 1, used: keep[i], why: why[i], ref: i === ref });
         uF.delete();
         await opts.onFrame(fr);
-        progress(0.65 + 0.03 * (k + 1) / offer.length, 'Keeping photos for retouching');
+        progress(at('export', (k + 1) / offer.length), 'Keeping photos for retouching');
       }
     }
     for (const i of left) { STORE.drop(warped[i].h); STORE.drop(wg[i].h); STORE.drop(wmask[i].h); STORE.drop(usable[i].h); warped[i] = wg[i] = wmask[i] = usable[i] = null; }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
-    progress(0.67, 'Merging');
+    progress(at('merge', 0), 'Merging');
     await tick();
 
     // ---------- 6. hybrid fusion ----------
@@ -407,7 +437,7 @@
     let out;
     if (opts.stripRows && H > opts.stripRows) {
       // merged and finished a band at a time; then cropped to the box, as RGBA
-      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(0.67 + 0.28 * p, 'Merging'), tick, opts.stripRows);
+      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(at('merge', p), 'Merging'), tick, opts.stripRows);
       unparkAll(weights);
       const data = new Uint8ClampedArray(box.w * box.h * 4);
       for (let y = 0; y < box.h; y++) {
@@ -417,7 +447,7 @@
       out = { data, width: box.w, height: box.h, log, ref: ref + 1 };
     } else {
     const wMats = weights.map(p => unpark(cv, p)); unparkAll(weights);
-    const fused = await fuseHybrid(cv, keptImgs, wMats, keptMask, p => progress(0.67 + 0.28 * p, 'Merging'), tick, debug);
+    const fused = await fuseHybrid(cv, keptImgs, wMats, keptMask, p => progress(at('merge', p * 0.95), 'Merging'), tick, debug);
     wMats.forEach(m => m.delete());
 
     // ---------- 7. finish ----------
@@ -1166,14 +1196,14 @@
     // the full-size flow (made from fs: upsized, in full-size pixels, clamped) sampled back down
     // to w x h the way cv.resize(INTER_LINEAR) samples, times k
     const fs = new cv.Mat(h, w, cv.CV_32FC2), FS = fs.data32F, F = fl.fs.data32F;
-    const ux = linearTaps(W, w), uy = linearTaps(H, h), dx = linearTaps(w, W), dy = linearTaps(h, H), maxPx = 0.04 * Math.max(W, H);
+    const ux = linearTaps(W, w), uy = linearTaps(H, h), dx = linearTaps(w, W), dy = linearTaps(h, H), maxPx = 0.04 * Math.max(W, H), near = maxPx * maxPx * 0.999;
     const full = (x, y, out) => {                       // full-size flow at pixel (x, y), not yet gated
       const r0 = uy.i0[y], r1 = Math.min(h - 1, r0 + 1), wy = uy.w1[y], c0 = ux.i0[x], c1 = Math.min(w - 1, c0 + 1), wx = ux.w1[x];
       const p00 = 2 * (r0 * w + c0), p01 = 2 * (r0 * w + c1), p10 = 2 * (r1 * w + c0), p11 = 2 * (r1 * w + c1);
       let u = Math.fround(Math.fround(F[p00] * (1 - wx) + F[p01] * wx) * (1 - wy) + Math.fround(F[p10] * (1 - wx) + F[p11] * wx) * wy);
       let v = Math.fround(Math.fround(F[p00 + 1] * (1 - wx) + F[p01 + 1] * wx) * (1 - wy) + Math.fround(F[p10 + 1] * (1 - wx) + F[p11 + 1] * wx) * wy);
       u = Math.fround(u / k); v = Math.fround(v / k);
-      const m = Math.hypot(u, v); if (m > maxPx) { u = Math.fround(u * (maxPx / m)); v = Math.fround(v * (maxPx / m)); }
+      if (u * u + v * v > near) { const m = Math.hypot(u, v); if (m > maxPx) { u = Math.fround(u * (maxPx / m)); v = Math.fround(v * (maxPx / m)); } }
       out[0] = u; out[1] = v;
     };
     const q00 = [0, 0], q01 = [0, 0], q10 = [0, 0], q11 = [0, 0];
@@ -1218,20 +1248,36 @@
       times the gate. Nothing full-size is kept: each use makes the rows it needs. */
   function flowField(fl, gate) {
     const W = fl.W, H = fl.H, s = fl.s, w = fl.fs.cols, h = fl.fs.rows, F = Float32Array.from(fl.fs.data32F), A = gate;
-    const tx = linearTaps(W, w), ty = linearTaps(H, h), maxPx = 0.04 * Math.max(W, H);
+    const tx = linearTaps(W, w), ty = linearTaps(H, h), maxPx = 0.04 * Math.max(W, H), near = maxPx * maxPx * 0.999;
+    const c1 = Int32Array.from(tx.i0, c => Math.min(w - 1, c + 1));
+    // a working-size row interpolated across the full width (u, v, gate), as cv.resize's
+    // horizontal pass does it (in single precision); cached by row, since neighbouring output
+    // rows share their source rows
+    const rowCache = new Map();
+    const hrow = r => {
+      let e = rowCache.get(r);
+      if (e) return e;
+      e = { u: new Float32Array(W), v: new Float32Array(W), g: new Float32Array(W) };
+      const b = r * w;
+      for (let x = 0; x < W; x++) {
+        const p0 = b + tx.i0[x], p1 = b + c1[x], wx = tx.w1[x], ix = 1 - wx;
+        e.u[x] = F[2 * p0] * ix + F[2 * p1] * wx; e.v[x] = F[2 * p0 + 1] * ix + F[2 * p1 + 1] * wx; e.g[x] = A[p0] * ix + A[p1] * wx;
+      }
+      if (rowCache.size > 4) rowCache.delete(rowCache.keys().next().value);
+      rowCache.set(r, e);
+      return e;
+    };
     /** rows y0..y1: fx, fy = the correction (pixels), or with maps the source position */
     function band(y0, y1, fx, fy, maps) {
       for (let y = y0, o = 0; y < y1; y++) {
-        const r0 = ty.i0[y], r1 = Math.min(h - 1, r0 + 1), wy = ty.w1[y], b0 = r0 * w, b1 = r1 * w;
+        const r0 = ty.i0[y], wy = ty.w1[y], iy = 1 - wy, R0 = hrow(r0), R1 = hrow(Math.min(h - 1, r0 + 1));
+        const U0 = R0.u, V0 = R0.v, G0 = R0.g, U1 = R1.u, V1 = R1.v, G1 = R1.g;
         for (let x = 0; x < W; x++, o++) {
-          const c0 = tx.i0[x], c1 = Math.min(w - 1, c0 + 1), wx = tx.w1[x];
-          const p00 = b0 + c0, p01 = b0 + c1, p10 = b1 + c0, p11 = b1 + c1;
-          // horizontal then vertical, in single precision, as cv.resize does
-          let u = Math.fround(Math.fround(F[2 * p00] * (1 - wx) + F[2 * p01] * wx) * (1 - wy) + Math.fround(F[2 * p10] * (1 - wx) + F[2 * p11] * wx) * wy);
-          let v = Math.fround(Math.fround(F[2 * p00 + 1] * (1 - wx) + F[2 * p01 + 1] * wx) * (1 - wy) + Math.fround(F[2 * p10 + 1] * (1 - wx) + F[2 * p11 + 1] * wx) * wy);
+          // then the vertical pass
+          let u = Math.fround(U0[x] * iy + U1[x] * wy), v = Math.fround(V0[x] * iy + V1[x] * wy);
           u = Math.fround(u / s); v = Math.fround(v / s);
-          const m = Math.hypot(u, v); if (m > maxPx) { u = Math.fround(u * (maxPx / m)); v = Math.fround(v * (maxPx / m)); }
-          const g = Math.fround(Math.fround(A[p00] * (1 - wx) + A[p01] * wx) * (1 - wy) + Math.fround(A[p10] * (1 - wx) + A[p11] * wx) * wy);
+          if (u * u + v * v > near) { const m = Math.hypot(u, v); if (m > maxPx) { u = Math.fround(u * (maxPx / m)); v = Math.fround(v * (maxPx / m)); } }
+          const g = Math.fround(G0[x] * iy + G1[x] * wy);
           u = Math.fround(u * g); v = Math.fround(v * g);
           if (maps) { fx[o] = x + u; fy[o] = y + v; } else { fx[o] = u; fy[o] = v; }
         }
@@ -1460,6 +1506,7 @@
       const gs = new cv.Mat(); cv.resize(gray, gs, half, 0, 0, cv.INTER_AREA); const S = gs.data32F;
       for (let k = 0; k < N; k++) meanHalf[k] += S[k] / n;
       gs.delete(); gray.delete();
+      progress((i + 1) / n * 0.22);
       await tick();
     }
     // the sharpest photo at each spot, among those that have pixels there
@@ -1532,7 +1579,7 @@
         }
       }
       lp.forEach(m => m.delete()); gw.forEach(m => m.delete()); gg.forEach(m => m.delete());
-      progress((i + 1) / n * 0.6);
+      progress(0.25 + (i + 1) / n * 0.43);
       await tick();
     }
     Fh.forEach(m => m.delete());
@@ -1567,7 +1614,7 @@
         e.delete();
       }
       lp.forEach(m => m.delete()); gg.forEach(m => m.delete());
-      progress(0.6 + (i + 1) / n * 0.3);
+      progress(0.68 + (i + 1) / n * 0.28);
       await tick();
     }
     if (debug) debug('merged', { width: sizes[1][0], height: sizes[1][1], count });
@@ -1641,18 +1688,20 @@
           if (smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
         }
         lp.forEach(m => m.delete()); gg.forEach(m => m.delete());
-        progress(0.08 + 0.04 * (i + 1) / n); await tick();
+        progress(0.08 + 0.08 * (i + 1) / n); await tick();
       }
     }
     // --- the strips ---
     const out = new Uint8Array(W * H * 3);
     let pending = null;                                   // the previous strip's rows in the cross-fade zone (float)
     const to8 = v => { const r = Math.round(v * 255 + 0.5); return r < 0 ? 0 : r > 255 ? 255 : r; };
+    const rowsAll = starts.reduce((a, _, k) => a + span(k).e1 - span(k).e0, 0);
+    let rowsDone = 0;
     for (let s = 0; s < starts.length; s++) {
       const { y0, y1, e0, e1 } = span(s), last = s === starts.length - 1;
       const views = imgs8.map(p => pview(p, e0, e1)), vv = valid.map(p => pview(p, e0, e1));
       const ws = weights.map((_, i) => wcrop(i, e0, e1));
-      const base = 0.12 + 0.88 * s / starts.length, part = 0.88 / starts.length;
+      const base = 0.16 + 0.84 * rowsDone / rowsAll, part = 0.84 * (e1 - e0) / rowsAll; rowsDone += e1 - e0;
       const fused = await fuseHybrid(cv, views, ws, vv, p => progress(base + part * p), tick, null, { lo, hi, noise });
       ws.forEach(m => m.delete());
       const b = new cv.Mat(); cv.GaussianBlur(fused, b, new cv.Size(0, 0), 1.2, 1.2);
