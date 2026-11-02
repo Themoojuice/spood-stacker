@@ -309,7 +309,9 @@ body.rt-open { overflow: hidden; }
     if (s) $('stage').textContent = s;
     if (p > 0.15 && p < 1) {
       const el = (performance.now() - t0) / 1000, left = Math.max(0, el / p - el);
-      $('eta').textContent = `About ${left < 60 ? Math.max(5, Math.ceil(left / 5) * 5) + ' seconds' : Math.ceil(left / 60) + ' min'} left. Keep this screen open.`;
+      // to the nearest 5 s under a minute, then to the nearest half minute
+      const half = Math.round(left / 30) / 2, mins = Math.floor(half) + (half % 1 ? '½' : '');
+      $('eta').textContent = `About ${left < 60 ? Math.max(5, Math.round(left / 5) * 5) + ' seconds' : mins + ' min'} left. Keep this screen open.`;
     }
   }
   function log(m) { $('log').textContent += m + '\n'; }
