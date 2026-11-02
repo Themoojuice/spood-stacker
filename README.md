@@ -39,6 +39,8 @@ With **Full detail** ticked (the default) the app stacks at the photos' own size
 
 Before starting, the engine estimates its peak memory from the number of photos and their size (`planSize` in `engine.js`, from measured peaks per stage), picks the strip height, and picks the largest working size that fits; if it had to shrink the stack, the result card says so. Running out of memory anyway still retries by itself at a smaller size. `node tools/memprobe.js` measures the heap per stage (see its header).
 
+**Several cores at once.** The engine's worker starts up to four helper workers, each with its own OpenCV, and hands them the heavy steps that don't depend on each other: warping each photo, each photo's local correction, the merge's per-photo measurements and its strips, and the retouch copies (which they also turn into JPEGs). They read and write the parked images in the same scratch file (each with its own handle on it), and their results are the same as working through the steps one by one. How many run at once, and how tall the merge strips are, comes from the same memory plan (helpers share a budget). If the scratch file can't be shared, or a stack runs out of memory on several cores, it runs on one. If a stack is cut short (the phone closed the app mid-stack), the next ones use two helpers, then one core; ten good stacks in a row step back up. Memory: a 26-photo 12 MP stack peaked at about 3.0 GB for the whole tab with four helpers, against 2.5 GB on one core (headless Chromium). `?helpers=N` in the address sets the number of helpers, for testing (0 = one core).
+
 **OpenCV.js build.** The app loads `vendor/opencv-4.10.0-simd.js`, built for it by `.github/workflows/opencv-js.yml`: WebAssembly SIMD (blurs and pyramids 2-3x faster; a 20-photo stack took 30% less time) and a 4 GiB memory ceiling. A browser without SIMD gets `vendor/opencv-4.10.0-2g.js`, the stock build with its ceiling raised from 1 GiB to 2 GiB by `tools/patch_cv.py`.
 
 ## Comparing engine versions
@@ -68,7 +70,7 @@ The synthetic scenes (`tests/make_synthetic.py`): `bark` (handheld lean-in with 
 ## Files
 - `index.html`: the app screen
 - `engine.js`: the stacking engine
-- `worker.js`: runs the engine in a background thread
+- `worker.js`: runs the engine in a background thread, with `helper.js` workers alongside it (`cvload.js` loads OpenCV into each)
 - `exif.js`: copies the EXIF into the saved JPEG
 - `retouch.js`: the retouch brush
 - `sw.js`: service worker (receives shared photos, works offline)

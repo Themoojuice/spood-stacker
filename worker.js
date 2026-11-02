@@ -1,27 +1,53 @@
 /* Runs the stacking engine off the main thread so the screen stays responsive.
    The page hands over the photo files themselves; each is decoded here only when the
    engine reaches it, so a long burst never sits in memory as full-size pixels at once. */
-// OpenCV.js built for this app (.github/workflows/opencv-js.yml): WebAssembly SIMD and a 4 GiB
-// memory ceiling. A browser without SIMD gets the stock build with its ceiling raised to 2 GiB.
-const SIMD = (() => {
-  try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); }
-  catch (e) { return false; }
-})();
-const CV_BUILD = SIMD ? { file: 'vendor/opencv-4.10.0-simd.js', heapCapMiB: 4095 } : { file: 'vendor/opencv-4.10.0-2g.js', heapCapMiB: 2047 };
-importScripts(CV_BUILD.file, 'exif.js', 'engine.js');
+importScripts('cvload.js', 'exif.js', 'engine.js');
 
-const cvReady = new Promise(resolve => {
-  const c = self.cv;
-  // OpenCV.js may be the module itself, a "thenable" module (resolving a promise with it loops
-  // forever unless .then is removed) or a promise of the module (newer builds)
-  const fin = m => { try { delete m.then; } catch (e) { /* ignore */ } self.cv = m; resolve(m); };
-  if (c && c.Mat) fin(c);
-  else if (c && typeof c.then === 'function') c.then(m => fin(m && m.Mat ? m : c));
-  else c.onRuntimeInitialized = () => fin(c);
-});
-
-const errText = (cv, e) => (typeof e === 'number' && cv && cv.exceptionFromPtr)
-  ? cv.exceptionFromPtr(e).msg : (e && e.message) || String(e);
+/* Helpers: up to 4 more workers, each with its own OpenCV, that run the heavy per-photo and
+   per-strip steps side by side (the phone has the cores; one worker uses one). They read and
+   write parked images in the same scratch file. Started now, so they are ready by the time a
+   stack starts. */
+const HELPERS = new URLSearchParams(self.location.search).has('helpers')            // a test can set the number
+  ? Math.max(0, Math.min(8, +new URLSearchParams(self.location.search).get('helpers') || 0))
+  : Math.min(4, Math.max(1, navigator.hardwareConcurrency || 4), (navigator.deviceMemory || 8) <= 4 ? 2 : 4);
+class HelperPool {
+  constructor(n) {
+    this.workers = []; this.idle = []; this.queue = []; this.pending = new Map(); this.seq = 0; this.heaps = new Map();
+    this.ready = Promise.all([...Array(n)].map(() => new Promise(resolve => {
+      const w = new Worker('helper.js');
+      w.onmessage = e => {
+        const m = e.data;
+        if (m.ready) { this.workers.push(w); this.idle.push(w); resolve(); this.pump(); return; }
+        if ('progress' in m) { const job = this.pending.get(m.id); if (job && job.onProgress) job.onProgress(m.progress); return; }
+        const job = this.pending.get(m.id); this.pending.delete(m.id);
+        if (m.heap) this.heaps.set(w, m.heap);
+        if (job.broadcast) job.w = null; else this.idle.push(w);
+        if (m.error) job.reject(new Error(m.error)); else job.resolve(m.result);
+        this.pump();
+      };
+      w.onerror = e => { e.preventDefault(); resolve(); for (const job of this.pending.values()) job.reject(new Error(e.message || 'A helper stopped.')); this.pending.clear(); };
+    })));
+  }
+  get size() { return this.workers.length; }
+  stop() { this.workers.forEach(w => w.terminate()); this.workers = []; this.idle = []; }
+  pump() {
+    while (this.idle.length && this.queue.length) {
+      const w = this.idle.pop(), job = this.queue.shift();
+      this.pending.set(job.id, job);
+      w.postMessage({ id: job.id, name: job.name, args: job.args });
+    }
+  }
+  run(name, args, onProgress) { return new Promise((resolve, reject) => { this.queue.push({ id: ++this.seq, name, args, resolve, reject, onProgress }); this.pump(); }); }
+  /** the same message to every helper (open or close the scratch file), once none is busy */
+  all(msg) {
+    return Promise.all(this.workers.map(w => new Promise((resolve, reject) => {
+      const id = ++this.seq; this.pending.set(id, { resolve, reject, broadcast: true });
+      w.postMessage(Object.assign({ id }, msg));
+    })));
+  }
+}
+let pool = null;
+cvReady.then(() => { try { pool = HELPERS ? new HelperPool(HELPERS) : null; } catch (e) { pool = null; } });
 
 cvReady.then(() => postMessage({ type: 'ready', simd: SIMD }));
 
@@ -69,21 +95,11 @@ function headerSize(u8) {
   return null;
 }
 
-/** The photo's pixels at w x h (RGBA), drawn the way the page always did. */
-async function decode(file, w, h) {
-  let bmp;
-  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { throw cantOpen(file); }
-  const c = new OffscreenCanvas(w, h), g = c.getContext('2d', { willReadFrequently: true });
-  g.imageSmoothingQuality = 'high'; g.drawImage(bmp, 0, 0, w, h); bmp.close();
-  const d = g.getImageData(0, 0, w, h).data;
-  c.width = c.height = 1;                                         // let the canvas memory go now
-  return d;
-}
 
 /** Where the engine parks its big per-photo images while it isn't using them: a scratch file
     in the site's private storage on the phone (OPFS), read and written in place, so they cost
     no RAM. Falls back to memory, image by image, if the file can't be used or fills up. */
-async function scratchStore() {
+async function scratchStore(shared) {
   let root, name, ah;
   try {
     if (!(self.navigator && navigator.storage && navigator.storage.getDirectory)) return null;
@@ -93,12 +109,16 @@ async function scratchStore() {
     name = 'spood-scratch-' + Date.now();
     const fh = await root.getFileHandle(name, { create: true });
     if (!fh.createSyncAccessHandle) return null;
-    ah = await fh.createSyncAccessHandle();
+    // shared: the helpers open the same file (each its own handle); otherwise this worker alone
+    try { ah = shared ? await fh.createSyncAccessHandle({ mode: 'readwrite-unsafe' }) : null; } catch (e) { ah = null; }
+    if (!ah) ah = await fh.createSyncAccessHandle();
   } catch (e) { return null; }
   let end = 0, onDisk = 0, inMemory = 0;
   const free = new Map();                                        // size -> offsets of dropped images
   return {
-    put(u) {
+    name, shareable: ah.mode === 'readwrite-unsafe',
+    sync() { ah.flush(); },
+    put(u, temp) {                                               // temp: a view into the WASM heap
       const len = u.length, spare = free.get(len);
       const at = spare && spare.length ? spare.pop() : end;
       try {
@@ -109,7 +129,7 @@ async function scratchStore() {
       } catch (e) {
         if (at !== end) spare.push(at);
         inMemory += len;
-        return { mem: u, len };                                  // storage full: keep this one in memory
+        return { mem: temp ? u.slice() : u, len };               // storage full: keep this one in memory
       }
     },
     /** room for an image that will be written a band at a time (set) */
@@ -125,6 +145,10 @@ async function scratchStore() {
       const b = new Uint8Array(len);
       if (ah.read(b, { at: h.at + off }) !== len) throw new Error('Could not read back a photo from scratch storage.');
       return b;
+    },
+    read(h, off, dst) {
+      if (h.mem) { dst.set(h.mem.subarray(off, off + dst.length)); return; }
+      if (ah.read(dst, { at: h.at + off }) !== dst.length) throw new Error('Could not read back a photo from scratch storage.');
     },
     set(h, off, u) {
       if (h.mem) { if (u.buffer !== h.mem.buffer || u.byteOffset !== h.mem.byteOffset + off) h.mem.set(u, off); return; }
@@ -148,39 +172,48 @@ async function scratchStore() {
 self.onmessage = async ev => {
   const cv = await cvReady;
   const { files, taken, opts } = ev.data;
-  const store = await scratchStore();
+  if (pool && !opts.noHelpers) await pool.ready;
+  const wantHelpers = pool && pool.size > 0 && !opts.noHelpers;
+  const maxHelpers = opts.maxHelpers === undefined ? Infinity : opts.maxHelpers;
+  const store = await scratchStore(wantHelpers);
+  const helpers = wantHelpers && store && store.shareable ? Math.min(pool.size, maxHelpers) : 0;
   try {
     const native = [];
     for (const f of files) native.push(await imageSize(f));
     // the largest working size whose memory need fits (the engine knows its own appetite)
-    const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory, heapCapMiB: CV_BUILD.heapCapMiB });
+    const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory, heapCapMiB: CV_BUILD.heapCapMiB, helpers });
     postMessage({ type: 'plan', plan });
     postMessage({ type: 'log', m: store ? 'parking photos in scratch storage on the phone' : 'parking photos in memory' });
+    postMessage({ type: 'log', m: helpers ? `working on ${helpers} cores at once` : 'working on one core' });
+    if (helpers) await pool.all({ type: 'open', name: store.name });
     const frames = files.map((file, i) => {
       const s = Math.min(1, plan.side / Math.max(native[i].width, native[i].height));
       const width = Math.max(1, Math.round(native[i].width * s)), height = Math.max(1, Math.round(native[i].height * s));
-      return { width, height, srcPixels: native[i].width * native[i].height, taken: taken[i], read: () => decode(file, width, height) };
+      // the file itself: the engine (or a helper) decodes it when it gets to it
+      return { width, height, srcPixels: native[i].width * native[i].height, taken: taken[i], file };
     });
     const out = await self.SalticidStacker.stackFrames(cv, frames, Object.assign({}, opts, {
       maxSide: plan.side, stripRows: plan.stripRows, store: store || undefined,
+      pool: helpers ? { size: helpers, limits: plan.limits, cores: navigator.hardwareConcurrency || 0, run: (name, args, onProgress) => pool.run(name, args, onProgress) } : undefined,
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),
       onSelection: sel => postMessage({ type: 'selection', sel }),
       // lined-up photos for the retouch brush, sent as JPEGs to keep the page's memory down
       onFrame: opts.retouch && typeof OffscreenCanvas !== 'undefined' ? async f => {
-        const c = new OffscreenCanvas(f.width, f.height);
-        c.getContext('2d').putImageData(new ImageData(f.data, f.width, f.height), 0, 0);
-        const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.95 });
-        c.width = c.height = 1;
-        postMessage({ type: 'frame', frame: { photo: f.photo, used: f.used, why: f.why, ref: f.ref,
-          width: f.width, height: f.height, blob, focus: f.focus } }, [f.focus.data.buffer]);
-      } : null
+        const frame = f.blob ? f : await encodeFrame(f);              // a helper may have encoded it already
+        postMessage({ type: 'frame', frame }, [frame.focus.data.buffer]);
+      } : null, encodeFrames: true
     }));
+    if (helpers) postMessage({ type: 'log', m: `memory: main ${Math.round(cv.HEAP8.length / 1048576)} MB, helpers ${[...pool.heaps.values()].map(h => Math.round(h / 1048576)).join(' + ')} MB` });
     if (store) { const st = store.stats(); postMessage({ type: 'log', m: `scratch storage used: ${st.fileMiB} MB` + (st.inMemoryMiB ? ` (+${st.inMemoryMiB} MB kept in memory)` : '') }); }
     postMessage({ type: 'done', out }, [out.data.buffer]);
   } catch (e) {
     postMessage({ type: 'error', message: errText(cv, e) });
   } finally {
+    if (helpers) await pool.all({ type: 'close' }).catch(() => {});
     if (store) await store.close();
+    // fresh helpers for the next stack: a WebAssembly heap never shrinks, so this hands their
+    // memory back now (to the retouch brush, the rest of the phone) instead of holding it
+    if (pool) { pool.stop(); pool = new HelperPool(HELPERS); }
   }
 };
