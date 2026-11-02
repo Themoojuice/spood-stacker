@@ -1,19 +1,29 @@
 /* Runs the stacking engine off the main thread so the screen stays responsive.
    The page hands over the photo files themselves; each is decoded here only when the
    engine reaches it, so a long burst never sits in memory as full-size pixels at once. */
-importScripts('vendor/opencv-4.10.0-2g.js', 'exif.js', 'engine.js');
+// OpenCV.js built for this app (.github/workflows/opencv-js.yml): WebAssembly SIMD and a 4 GiB
+// memory ceiling. A browser without SIMD gets the stock build with its ceiling raised to 2 GiB.
+const SIMD = (() => {
+  try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); }
+  catch (e) { return false; }
+})();
+const CV_BUILD = SIMD ? { file: 'vendor/opencv-4.10.0-simd.js', heapCapMiB: 4095 } : { file: 'vendor/opencv-4.10.0-2g.js', heapCapMiB: 2047 };
+importScripts(CV_BUILD.file, 'exif.js', 'engine.js');
 
 const cvReady = new Promise(resolve => {
   const c = self.cv;
-  // OpenCV.js is "thenable"; resolving a promise with it loops forever unless .then is removed
-  const fin = () => { try { delete c.then; } catch (e) { /* ignore */ } resolve(c); };
-  if (c && c.Mat) fin(); else c.onRuntimeInitialized = fin;
+  // OpenCV.js may be the module itself, a "thenable" module (resolving a promise with it loops
+  // forever unless .then is removed) or a promise of the module (newer builds)
+  const fin = m => { try { delete m.then; } catch (e) { /* ignore */ } self.cv = m; resolve(m); };
+  if (c && c.Mat) fin(c);
+  else if (c && typeof c.then === 'function') c.then(m => fin(m && m.Mat ? m : c));
+  else c.onRuntimeInitialized = () => fin(c);
 });
 
 const errText = (cv, e) => (typeof e === 'number' && cv && cv.exceptionFromPtr)
   ? cv.exceptionFromPtr(e).msg : (e && e.message) || String(e);
 
-cvReady.then(() => postMessage({ type: 'ready' }));
+cvReady.then(() => postMessage({ type: 'ready', simd: SIMD }));
 
 const cantOpen = f => new Error(`Could not open ${f.name}. If it is a HEIC photo, set the camera to save JPEG.`);
 
@@ -102,6 +112,14 @@ async function scratchStore() {
         return { mem: u, len };                                  // storage full: keep this one in memory
       }
     },
+    /** room for an image that will be written a band at a time (set) */
+    alloc(len) {
+      const spare = free.get(len);
+      if (spare && spare.length) { onDisk += len; return { at: spare.pop(), len }; }
+      try { ah.truncate(end + len); } catch (e) { inMemory += len; return { mem: new Uint8Array(len), len }; }   // storage full
+      const at = end; end += len; onDisk += len;
+      return { at, len };
+    },
     get(h, off = 0, len = h.len - off) {
       if (h.mem) return h.mem.subarray(off, off + len);
       const b = new Uint8Array(len);
@@ -135,7 +153,7 @@ self.onmessage = async ev => {
     const native = [];
     for (const f of files) native.push(await imageSize(f));
     // the largest working size whose memory need fits (the engine knows its own appetite)
-    const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory });
+    const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory, heapCapMiB: CV_BUILD.heapCapMiB });
     postMessage({ type: 'plan', plan });
     postMessage({ type: 'log', m: store ? 'parking photos in scratch storage on the phone' : 'parking photos in memory' });
     const frames = files.map((file, i) => {

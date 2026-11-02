@@ -16,10 +16,11 @@ function needSharp() {
 let cvPromise = null;
 function loadCv() {
   if (!cvPromise) cvPromise = new Promise(resolve => {
-    const cv = require(path.join(ROOT, 'vendor', 'opencv-4.10.0-2g.js'));
+    // the build the app uses (SIMD, 4 GiB); CV_BUILD=2g for the fallback build
+    const cv = require(path.join(ROOT, 'vendor', process.env.CV_BUILD === '2g' ? 'opencv-4.10.0-2g.js' : 'opencv-4.10.0-simd.js'));
     const fin = c => { try { delete c.then; } catch (e) { /* ignore */ } resolve(c); };
     if (cv.Mat) fin(cv);
-    else if (typeof cv.then === 'function') cv.then(fin);
+    else if (typeof cv.then === 'function') cv.then(m => fin(m && m.Mat ? m : cv));
     else cv.onRuntimeInitialized = () => fin(cv);
   });
   return cvPromise;
