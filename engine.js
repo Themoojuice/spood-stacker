@@ -38,7 +38,7 @@
     const mp = W * H / 1e6, strips = stripRows ? stripRows / Math.max(1, stripRows - STRIP_CTX) : 1;
     const cost = [
       ['read', n * 0.03 * mp], ['order', n * 0.05], ['align', (n - 1) * 1.3],
-      ['warp', (n - 1) * 0.2 * mp], ['prep', n * 0.012 * mp], ['flow', (n - 1) * (0.55 + 0.13 * mp)],
+      ['warp', (n - 1) * 0.07 * mp], ['prep', n * 0.012 * mp], ['flow', (n - 1) * (0.55 + 0.13 * mp)],
       ['select', n * (0.25 + 0.036 * mp)], ['export', retouch ? n * 0.035 * mp : 0], ['merge', n * 0.165 * mp * strips]];
     const total = cost.reduce((a, c) => a + c[1], 0), span = {};
     let acc = 0;
@@ -220,7 +220,7 @@
     for (let i = 0; i < n; i++) {
       progress(at('warp', i / n), 'Lining up photos');
       if (Hs[i].every((v, k) => v === (k % 4 === 0 ? 1 : 0))) {
-        // the reference: warping it would copy it pixel for pixel (Lanczos at whole pixels)
+        // the reference: warping it would copy it pixel for pixel (interpolation at whole pixels)
         warped[i] = rgb[i]; rgb[i] = null; wmask[i] = park(cv, masks[i].clone());
         continue;
       }
@@ -228,7 +228,9 @@
       warped[i] = parkEmpty(H, W, cv.CV_8UC3, 3); wmask[i] = parkEmpty(H, W, cv.CV_8U, 1);
       for (let y0 = 0; y0 < H; y0 += BAND) {
         const y1 = Math.min(H, y0 + BAND), M = cv.matFromArray(3, 3, cv.CV_64F, mul3([1, 0, 0, 0, 1, -y0, 0, 0, 1], Hs[i]));
-        const wp = new cv.Mat(); cv.warpPerspective(src, wp, M, sz(W, y1 - y0), cv.INTER_LANCZOS4, cv.BORDER_REFLECT);
+        // bicubic: as sharp as Lanczos here (no visible difference on real stacks; closer to the
+        // truth on every synthetic scene, with less ringing on noise) at a quarter of the cost
+        const wp = new cv.Mat(); cv.warpPerspective(src, wp, M, sz(W, y1 - y0), cv.INTER_CUBIC, cv.BORDER_REFLECT);
         parkRows(warped[i], y0, wp); wp.delete();
         const wm = new cv.Mat(); cv.warpPerspective(masks[i], wm, M, sz(W, y1 - y0), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
         parkRows(wmask[i], y0, wm); wm.delete();
