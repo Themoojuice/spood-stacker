@@ -4,6 +4,7 @@
    --lazy        decode each photo only when the engine reaches it (as the app does)
    --store disk  park big images in files instead of memory (stands in for the app's scratch file)
    --strips N    merge in strips of N rows
+   --workers N   N helper threads run the heavy steps side by side (with --store disk)
    Writes <prefix>.png (unless it failed) and <prefix>.json: heap high-water per stage, time, log, error.
    The stock OpenCV.js grows its heap in big steps; for the true peak use an exact-growth build:
      python3 tools/patch_cv.py vendor/opencv-4.10.0-2g.js /tmp/opencv-measure.js 2047 exact */
@@ -49,13 +50,18 @@ async function main() {
     // parked images in files (stands in for OPFS in the browser), ranged reads and writes
     const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'park-')); let seq = 0;
     store = {
+      shareable: true,
       put: u => { const f = path.join(dir, String(seq++)); const fd = fs.openSync(f, 'w+'); fs.writeSync(fd, u, 0, u.length, 0); return { fd, f, len: u.length }; },
+      alloc: len => { const f = path.join(dir, String(seq++)); const fd = fs.openSync(f, 'w+'); fs.ftruncateSync(fd, len); return { fd, f, len }; },
       get: (h, off = 0, len = h.len - off) => { const b = Buffer.allocUnsafe(len); fs.readSync(h.fd, b, 0, len, off); return new Uint8Array(b.buffer, b.byteOffset, len); },
+      read: (h, off, dst) => { fs.readSync(h.fd, dst, 0, dst.length, off); },
       set: (h, off, u) => { fs.writeSync(h.fd, u, 0, u.length, off); },
       drop: h => { try { fs.closeSync(h.fd); fs.unlinkSync(h.f); } catch (e) {} }
     };
     process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} });
   }
+  // helper threads (--workers N; needs --store disk, whose handles every thread can use)
+  const pool = +arg('workers', 0) > 0 ? await require(path.join(TOOLS, 'pool-node')).makePool(+arg('workers'), enginePath) : null;
   const MiB = x => Math.round(x / 1048576);
   const heap = () => cv.HEAP8.length;
   const startHeap = heap();
@@ -75,12 +81,13 @@ async function main() {
   const t0 = Date.now(); global.__t0 = t0;
   let res = null, err = null;
   try {
-    res = await engine.stackFrames(cv, frames, { maxSide: side, keepAll: flag('keepall'), store, stripRows: +arg('strips', 0),
+    res = await engine.stackFrames(cv, frames, { maxSide: side, keepAll: flag('keepall'), store, pool, stripRows: +arg('strips', 0),
       onProgress: sample, onLog: m => { log.push(m); sample(0, null); } });
   } catch (e) {
     err = typeof e === 'number' && cv.exceptionFromPtr ? cv.exceptionFromPtr(e).msg : (e && e.message) || String(e);
   }
   sample(1, null);
+  if (pool) pool.close();
   const secs = (Date.now() - t0) / 1000;
   const W = frames[0].width, H = frames[0].height;
   const info = {

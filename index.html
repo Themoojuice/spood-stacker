@@ -235,7 +235,8 @@ body.rt-open { overflow: hidden; }
   // ---------- engine (Web Worker) ----------
   function engineStatus(t) { $('engine').textContent = 'Stacking engine: ' + t; refreshGo(); }
   function startWorker() {
-    worker = new Worker('worker.js'); ready = false;
+    const hp = new URLSearchParams(location.search).get('helpers');                 // for tests: ?helpers=N
+    worker = new Worker('worker.js' + (hp !== null ? '?helpers=' + encodeURIComponent(hp) : '')); ready = false;
     worker.onmessage = e => {
       const d = e.data;
       if (d.type === 'ready') { ready = true; engineStatus('ready. Everything runs on this phone.'); maybeAutoStart(); }
@@ -331,14 +332,34 @@ body.rt-open { overflow: hidden; }
   try { if (localStorage.getItem('spood-full-detail') === '0') $('hi').checked = false; } catch (e) { /* private mode */ }
   $('hi').addEventListener('change', () => { try { localStorage.setItem('spood-full-detail', $('hi').checked ? '1' : '0'); } catch (e) {} });
 
-  let lastSide = 0, retrySide = 0, plan = null;
+  let lastSide = 0, retrySide = 0, plan = null, oneCore = false, lastHelpers = 0;
+  // If a stack never finished (the browser closed the tab mid-stack, likely for memory), the
+  // next ones use fewer cores at once: 2 helpers after one such stack, one core after two.
+  let coresCap = Infinity;
+  try {
+    let cut = +localStorage.getItem('spood-cut-short') || 0;
+    if (localStorage.getItem('spood-running')) { cut++; localStorage.setItem('spood-cut-short', String(cut)); localStorage.removeItem('spood-running'); }
+    coresCap = cut >= 2 ? 0 : cut === 1 ? 2 : Infinity;
+  } catch (e) { /* private mode */ }
+  // closing the app or leaving the page on purpose doesn't count as cut short
+  addEventListener('pagehide', () => { try { localStorage.removeItem('spood-running'); } catch (e) {} });
+  // ten good stacks after being cut short: one step back towards all cores
+  function stackFinished() {
+    try {
+      const cut = +localStorage.getItem('spood-cut-short') || 0;
+      if (!cut) return;
+      const ok = (+localStorage.getItem('spood-ok-since-cut') || 0) + 1;
+      if (ok >= 10) { localStorage.setItem('spood-cut-short', String(cut - 1)); localStorage.setItem('spood-ok-since-cut', '0'); }
+      else localStorage.setItem('spood-ok-since-cut', String(ok));
+    } catch (e) { /* private mode */ }
+  }
   function gotPlan(p) {
-    plan = p; lastSide = p.side;
+    plan = p; lastSide = p.side; lastHelpers = p.helpers || 0;
     log(`working size ${p.width}×${p.height}` + (p.shrunk ? ` (photos are ${p.nativeSide} px on the long side; shrunk to fit memory)` : ''));
   }
   async function run() {
     if (busy || files.length < 2 || !ready) return;
-    busy = true; refreshGo(); result = null; rtFrames = []; stackPixels = autoPixels = null; refPhoto = 0; plan = null; lastSide = 0;
+    busy = true; refreshGo(); result = null; rtFrames = []; stackPixels = autoPixels = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
@@ -347,12 +368,14 @@ body.rt-open { overflow: hidden; }
     const lowMem = (navigator.deviceMemory || 8) <= 4;
     // the engine picks the largest working size that fits in memory, up to this
     const maxSide = retrySide || ($('hi').checked ? Infinity : (lowMem ? 2400 : 3000));
+    if (!retrySide) oneCore = false;                     // a fresh stack tries all cores again
     retrySide = 0;
     try {
       // the files themselves go to the engine, which decodes each photo only when it gets to it
       const taken = [];
       for (const f of files) taken.push(await takenOf(f));
-      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas) } });
+      try { localStorage.setItem('spood-running', '1'); } catch (e) { /* private mode */ }
+      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas) } });
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -420,6 +443,7 @@ body.rt-open { overflow: hidden; }
       sn.hidden = false;
     } else sn.hidden = true;
     setProgress(1, 'Done');
+    stackFinished();
     S.work.hidden = true; S.done.hidden = false;
     $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
     save();
@@ -455,6 +479,16 @@ body.rt-open { overflow: hidden; }
   }
   function fail(m) {
     const oom = /memory|alloc|abort|OOM/i.test(m);
+    if (oom && lastHelpers > 0 && !oneCore && lastSide) {
+      // several cores at once need more memory: first try again on one, at the same size
+      oneCore = true; retrySide = lastSide;
+      log(`Ran out of memory working on ${lastHelpers} cores; retrying on one`);
+      $('stage').textContent = 'Needed more memory. Retrying on one core…';
+      busy = false;
+      if (worker) worker.terminate();
+      engineStatus('restarting…'); autoStart = true; startWorker();
+      return;
+    }
     if (oom && lastSide > 2000) {
       // try again by itself at a smaller working size (the engine's own estimate should
       // make this rare; it is the safety net)
@@ -477,7 +511,7 @@ body.rt-open { overflow: hidden; }
     done();
     if (worker) { worker.terminate(); engineStatus('restarting…'); startWorker(); }
   }
-  function done() { busy = false; refreshGo(); try { wake?.release(); } catch (e) {} wake = null; }
+  function done() { busy = false; refreshGo(); try { wake?.release(); localStorage.removeItem('spood-running'); } catch (e) {} wake = null; }
 
   $('save').addEventListener('click', save);
   $('share').addEventListener('click', async () => {
