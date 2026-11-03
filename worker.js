@@ -194,6 +194,7 @@ self.onmessage = async ev => {
     });
     const out = await self.SalticidStacker.stackFrames(cv, frames, Object.assign({}, opts, {
       maxSide: plan.side, stripRows: plan.stripRows, store: store || undefined,
+      sharpen: 0,                     // the page sharpens the result (and the retouch copies) itself, at the slider's amount
       pool: helpers ? { size: helpers, limits: plan.limits, cores: navigator.hardwareConcurrency || 0, run: (name, args, onProgress) => pool.run(name, args, onProgress) } : undefined,
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),

@@ -34,6 +34,46 @@
     const cache = new Map();        // index -> {data: ImageData, canvas}
     const origCanvas = document.createElement('canvas'); origCanvas.width = W; origCanvas.height = H;
     origCanvas.getContext('2d').putImageData(orig, 0, 0);
+    const origEntry = { data: orig, canvas: origCanvas };
+
+    // What is shown is sharpened like the saved stack (o.sharpen, sharpen.js); painting works on
+    // the unsharpened pixels, which is what the page sharpens when it saves. Sharpened lazily, a
+    // tile at a time, and only when zoomed in far enough for sharpening to show.
+    const AMT = +o.sharpen || 0, SS = root.SpoodSharpen, ST = 128;
+    function sharpLayer(px) {
+      const tw = Math.ceil(W / ST), th = Math.ceil(H / ST), ok = new Uint8Array(tw * th);
+      let c = null, g = null;
+      return {
+        get canvas() { return c; },
+        ensure(x0, y0, x1, y1) {
+          if (!c) { c = document.createElement('canvas'); c.width = W; c.height = H; g = c.getContext('2d'); }
+          const i0 = Math.max(0, Math.floor(x0 / ST)), i1 = Math.min(tw - 1, Math.floor((x1 - 1) / ST));
+          const j0 = Math.max(0, Math.floor(y0 / ST)), j1 = Math.min(th - 1, Math.floor((y1 - 1) / ST));
+          for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+            if (ok[j * tw + i]) continue;
+            const x = i * ST, y = j * ST, w = Math.min(ST, W - x), h = Math.min(ST, H - y);
+            g.putImageData(new ImageData(SS.tile(px.data, W, H, AMT, x, y, x + w, y + h), w, h), x, y);
+            ok[j * tw + i] = 1;
+          }
+        },
+        invalidate(x0, y0, x1, y1) {
+          const m = SS.MARGIN;
+          const i0 = Math.max(0, Math.floor((x0 - m) / ST)), i1 = Math.min(tw - 1, Math.floor((x1 + m - 1) / ST));
+          const j0 = Math.max(0, Math.floor((y0 - m) / ST)), j1 = Math.min(th - 1, Math.floor((y1 + m - 1) / ST));
+          for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) ok[j * tw + i] = 0;
+        },
+        free() { if (c) c.width = c.height = 0; c = null; ok.fill(0); }
+      };
+    }
+    const sharpOn = () => AMT > 0 && !!SS && s >= 0.75;
+    const workS = AMT > 0 && SS ? sharpLayer(img) : null;
+    /** the canvas to draw for an image, sharpened over rect r when zoomed in */
+    function shown(plain, layerOf, r) {
+      if (!sharpOn()) return plain;
+      const L = layerOf(); L.ensure(r.x0, r.y0, r.x1, r.y1); return L.canvas;
+    }
+    const workShown = r => shown(work, () => workS, r);
+    const srcShown = (e, r) => shown(e.canvas, () => e.sharp || (e.sharp = sharpLayer(e.data)), r);
 
     let mode = 'pick', peek = false, lens = null, strokes = [], stroke = null, dirty = null;
     let s = 1, tx = 0, ty = 0, dpr = 1, raf = 0, cursor = null;
@@ -43,7 +83,7 @@
 
     // ---------- sources ----------
     async function source(i) {
-      if (i < 0) return { data: orig, canvas: origCanvas };
+      if (i < 0) return origEntry;
       if (cache.has(i)) { const c = cache.get(i); cache.delete(i); cache.set(i, c); return c; }
       const bmp = await createImageBitmap(frames[i].blob);
       const c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -51,10 +91,10 @@
       g.drawImage(bmp, 0, 0, W, H); bmp.close && bmp.close();
       const entry = { data: g.getImageData(0, 0, W, H), canvas: c };
       cache.set(i, entry);
-      while (cache.size > 2) { const k = cache.keys().next().value; const e = cache.get(k); e.canvas.width = e.canvas.height = 0; cache.delete(k); }
+      while (cache.size > 2) { const k = cache.keys().next().value; const e = cache.get(k); e.canvas.width = e.canvas.height = 0; if (e.sharp) e.sharp.free(); cache.delete(k); }
       return entry;
     }
-    let cur = { data: orig, canvas: origCanvas };
+    let cur = origEntry;
     async function choose(i, why) {
       src = i; renderChips();
       cur = await source(i);
@@ -88,16 +128,21 @@
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
-        if (dirty) { wctx.putImageData(img, 0, 0, dirty.x0, dirty.y0, dirty.x1 - dirty.x0, dirty.y1 - dirty.y0); dirty = null; }
+        if (dirty) {
+          wctx.putImageData(img, 0, 0, dirty.x0, dirty.y0, dirty.x1 - dirty.x0, dirty.y1 - dirty.y0);
+          if (workS) workS.invalidate(dirty.x0, dirty.y0, dirty.x1, dirty.y1);
+          dirty = null;
+        }
+        const vis = { x0: -tx / s, y0: -ty / s, x1: (view.width - tx) / s, y1: (view.height - ty) / s };
         const g = view.getContext('2d');
         g.setTransform(1, 0, 0, 1, 0, 0);
         g.fillStyle = '#0d1110'; g.fillRect(0, 0, view.width, view.height);
         g.setTransform(s, 0, 0, s, tx, ty);
         g.imageSmoothingEnabled = s < 2; g.imageSmoothingQuality = 'high';
-        g.drawImage(peek ? cur.canvas : work, 0, 0);
+        g.drawImage(peek ? srcShown(cur, vis) : workShown(vis), 0, 0);
         if (lens && !peek) {
           g.save(); g.beginPath(); g.arc(lens.x, lens.y, lens.r, 0, Math.PI * 2); g.clip();
-          g.drawImage(cur.canvas, 0, 0); g.restore();
+          g.drawImage(srcShown(cur, { x0: lens.x - lens.r, y0: lens.y - lens.r, x1: lens.x + lens.r, y1: lens.y + lens.r }), 0, 0); g.restore();
           g.lineWidth = 2 / s; g.strokeStyle = '#4fc2b9'; g.beginPath(); g.arc(lens.x, lens.y, lens.r, 0, Math.PI * 2); g.stroke();
         }
         if (cursor && mode === 'paint') {
@@ -284,7 +329,9 @@
 
     function close() {
       listeners.forEach(([el, ev, fn, opt]) => el.removeEventListener(ev, fn, opt));
-      cache.forEach(e => { e.canvas.width = e.canvas.height = 0; }); cache.clear();
+      cache.forEach(e => { e.canvas.width = e.canvas.height = 0; if (e.sharp) e.sharp.free(); }); cache.clear();
+      if (origEntry.sharp) origEntry.sharp.free();
+      if (workS) workS.free();
       o.root.hidden = true; document.body.classList.remove('rt-open');
     }
 
