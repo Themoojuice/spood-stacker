@@ -7,7 +7,7 @@ here, against the truth, measures its halos.
 
 Replays tests/make_synthetic.py's random draws (camera motion and noise) so the outlines
 land where they are in the photos and truth images. Writes tests/bursts/<name>/truth/NN-edge.png
-(255 = halo zone, 0 elsewhere).
+(the halo zone: each pixel's distance from the outline, 1..BAND px; 0 elsewhere).
 
     python tests/edge_masks.py            # all scenes
     python tests/edge_masks.py still legs
@@ -24,7 +24,7 @@ BAND = 32
 def masks(name):
     sc = S.SCENES[name]
     rng = np.random.default_rng(sc['seed'])
-    bg = S.mesh(rng) if sc.get('bg') == 'mesh' else S.night(rng) if sc.get('bg') == 'night' else S.bark(rng)
+    bg = S.mesh(rng) if sc.get('bg') == 'mesh' else S.night(rng) if sc.get('bg') == 'night' else S.bokeh(rng) if sc.get('bg') == 'bokeh' else S.bark(rng)
     base = S.spider(np.random.default_rng(sc['seed'] + 100), S.W * 0.47, S.H * 0.42, 210, sc['legs'])
     moved = S.spider(np.random.default_rng(sc['seed'] + 100), S.W * 0.47, S.H * 0.42, 210, sc['legs'],
                      shift=sc['moved']) if sc['moved'] else None
@@ -41,7 +41,9 @@ def masks(name):
             fg = np.maximum(fg, cv2.warpPerspective(p.alpha, Hm, (S.W, S.H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT))
         inside = (fg > 0.5).astype(np.uint8)
         zone = cv2.dilate(inside, k_out) & (1 - cv2.dilate(inside, np.ones((3, 3), np.uint8)))
-        cv2.imwrite(os.path.join(d, f'{k + 1:02d}-edge.png'), zone * 255)
+        # value = distance from the outline in px (1..BAND), 0 outside the zone
+        dist = cv2.distanceTransform(1 - inside, cv2.DIST_L2, 5)
+        cv2.imwrite(os.path.join(d, f'{k + 1:02d}-edge.png'), (zone * np.clip(np.round(dist), 1, BAND)).astype(np.uint8))
         # keep the random stream in step with make(): the photo's noise draw
         rng.normal(0, sc.get('noise', 1.6) / 255, (S.H, S.W, 3))
         print(f'{name}: frame {k + 1}/{n}  halo zone {zone.mean() * 100:.1f}% of the frame', flush=True)

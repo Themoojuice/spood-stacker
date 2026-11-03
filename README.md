@@ -14,6 +14,11 @@ You can also open the app and tap **Tap to choose photos**. Nothing is uploaded:
 ### Date and location (EXIF)
 The saved JPEG carries the reference photo's EXIF: date taken, GPS location and camera, so iNaturalist can read them. The app says under the result what it kept. If it says the photos arrived without a location, Android removed it on the way in (Samsung's share sheet has a location option; Android can also strip location from photos handed to a browser). The laptop version reads the files directly and keeps it.
 
+### Sharpening and colour
+Under the result, **Sharpening** sets how crisp the saved stack is (0–150%; 70% is about as crisp as the old fixed setting). The close-up below it shows the stack at full size as you move the slider; drag it to look around. Letting go re-makes the JPEG; tap **Save again** to save that version. The setting is kept for the next stacks.
+
+The sharpening lifts brightness only (coloured edges get no coloured fringes), keeps each pixel within a couple of levels of its neighbours' range (edges get steeper without the light and dark rims of a plain unsharp mask), and leaves faint grain alone. The saved JPEG keeps full colour detail (4:4:4): the browser's own encoder stores colour at a quarter of the resolution below quality 100, so the app encodes it itself (`finish.js`, off the main thread).
+
 ### Retouch
 After stacking, tap **Retouch** to fix halos around legs and setae by hand, the way Zerene and Helicon do:
 - **Pick**: tap a spot. The photo that is sharpest there is chosen and shown in a lens. Tap the same spot again to cycle to the next sharpest photo. Drag to move around.
@@ -27,7 +32,7 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 3. **Local correction, pixel by pixel.** Dense optical flow corrects parallax and small body shifts. It is worked out both ways (reference → photo and back); where following it there and back doesn't land where it started (an occlusion), or where it ripples from place to place instead of changing gently (locked onto different cells of a repeating mesh), that spot keeps the plain line-up. Each photo gets a trust map: the two-way check passed there, or the plain line-up already agreed.
 4. **Photo selection.** A photo is left out if it can't be lined up, if it matched far worse than the others and couldn't be fine-tuned, if it is a near-duplicate (same picture, same framing *and* sharp in the same places; the higher-resolution copy is kept), if the subject moved in it, or if it adds no sharp detail the others lack. Movement is judged where the photos are sharp (the subject) and only where the photo has pixels, not over the whole frame, so a small subject that walked off is caught even when the background lines up perfectly. Capture times (EXIF, else the camera's file name) split the photos into moments: a photo taken more than 2 s apart from the rest (say, a refocused shot a few seconds later) is never the reference, but otherwise it is judged like any other photo, by whether it matches, not by when it was taken: its matching parts are used, and any part that moved is left out spot by spot. The app lists which photos were left out and why.
 5. **Per-region merging.** Each pixel comes from whichever photos are sharpest there, weighted by where each photo has pixels, agrees with the reference and can be trusted. So a photo with a sharp head and a blurry body contributes only its head. Coarse levels are blended by sharpness weights. Fine detail is merged from every photo that is nearly as sharp as the best one at that spot (at least 55%), as far as its detail agrees with the best photo's: near-equals average out each other's noise, while a photo whose detail differs (a slightly different line-up, a moved leg) is left out of that spot.
-6. The image is cropped to the area that at least one used photo saw (not just the area every photo saw), keeping roughly the photo's own shape, and lightly sharpened. The lined-up photos are kept, cropped and sharpened the same way, for the retouch brush.
+6. The image is cropped to the area that at least one used photo saw (not just the area every photo saw), keeping roughly the photo's own shape. The app sharpens it at the slider's amount (`sharpen.js`). The lined-up photos are kept, cropped the same way, for the retouch brush, which shows everything sharpened at the same amount.
 
 ### Memory and stack size
 With **Full detail** ticked (the default) the app stacks at the photos' own size, so a 12 MP burst comes out at about 12 MP. OpenCV.js keeps its work in one WebAssembly heap with a hard ceiling, however much memory the phone has, so the engine keeps that heap small:
@@ -73,6 +78,8 @@ The synthetic scenes (`tests/make_synthetic.py`): `bark` (handheld lean-in with 
 - `worker.js`: runs the engine in a background thread, with `helper.js` workers alongside it (`cvload.js` loads OpenCV into each)
 - `exif.js`: copies the EXIF into the saved JPEG
 - `retouch.js`: the retouch brush
+- `sharpen.js`: the final sharpening (page, retouch editor and `finish.js`)
+- `finish.js`: makes the saved JPEG off the main thread: sharpening, then `vendor/jpeg-encoder.js` (full colour detail; from jpeg-js, BSD-3-Clause)
 - `sw.js`: service worker (receives shared photos, works offline)
 - `manifest.webmanifest`: install and share-menu settings
 - `vendor/opencv-4.10.0-simd.js`: OpenCV.js 4.10.0 (Apache 2.0) built with SIMD and a 4 GiB memory ceiling by `.github/workflows/opencv-js.yml`

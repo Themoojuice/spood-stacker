@@ -1411,6 +1411,16 @@
   // MERGE_FROM of the sharpest photo's detail there (fully from MERGE_FULL), and
   // only as far as its detail agrees with the sharpest photo's (ROBUST x noise)
   const MERGE_FROM = 0.55, MERGE_FULL = 0.9, ROBUST = 2.5;
+  // halo guard: from this pyramid level up, a photo is weighted by its worst sharpness (relative
+  // to the sharpest photo) within the level's reach, not by its sharpness at the spot itself
+  let HALO_FROM = 2, HALO_P = 4;
+  // spill check: beside something sharp in front, a photo whose large-scale brightness differs
+  // from the photo that has that thing sharp by SPILL_TAU (0..1 grey) keeps half its weight there
+  let SPILL = true, SPILL_TAU = 0.02, SPILL_R = 6;
+  // fill: where no photo has real detail (smooth background), weights come from the nearest
+  // detail instead (within ~FILL_S half-size px). Real detail: the sharpest photo's focus is
+  // FILL_K times the blurriest's or more (half-way at FILL_K)
+  let FILL = true, FILL_K = 4, FILL_S = 12;
 
   function pyrSizes(W, H) {
     const s = [[W, H]];
@@ -1455,6 +1465,8 @@
     // --- weights from relative sharpness, computed at half size (weights are smooth) ---
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2), half = new cv.Size(hw, hh);
     const Fh = [], texMax = new Float32Array(W * H), N = hw * hh, meanHalf = new Float32Array(N);
+    const qw = Math.floor((hw + 1) / 2), qh = Math.floor((hh + 1) / 2), quarter = new cv.Size(qw, qh), NQ = qw * qh;
+    const Lq = [];                                     // each photo's large-scale brightness, quarter size
     for (let i = 0; i < n; i++) {
       // grey copy made on the fly (keeps memory down on phones)
       const im = unpark(cv, imgs8[i]), gray = toGray(cv, im); im.delete();
@@ -1465,13 +1477,97 @@
       f2.delete();
       const gs = new cv.Mat(); cv.resize(gray, gs, half, 0, 0, cv.INTER_AREA); const S = gs.data32F;
       for (let k = 0; k < N; k++) meanHalf[k] += S[k] / n;
+      if (SPILL) {
+        const q = new cv.Mat(); cv.resize(gs, q, quarter, 0, 0, cv.INTER_AREA); cv.GaussianBlur(q, q, new cv.Size(0, 0), 1, 1);
+        const u = new cv.Mat(); q.convertTo(u, cv.CV_8U, 255, 0); q.delete(); Lq.push(u);
+      }
       gs.delete(); gray.delete();
       progress((i + 1) / n * 0.22);
       await tick();
     }
     // the sharpest photo at each spot, among those that have pixels there
-    const Fmax = new Float32Array(N);
-    for (let i = 0; i < n; i++) { const d = Fh[i].data32F, g = weights[i].data; for (let k = 0; k < N; k++) if (g[k] > 0.02 * 255 && d[k] > Fmax[k]) Fmax[k] = d[k]; }
+    const Fmax = new Float32Array(N), Fmin = new Float32Array(N).fill(Infinity);
+    for (let i = 0; i < n; i++) {
+      const d = Fh[i].data32F, g = weights[i].data;
+      for (let k = 0; k < N; k++) if (g[k] > 0.02 * 255) { if (d[k] > Fmax[k]) Fmax[k] = d[k]; if (d[k] < Fmin[k]) Fmin[k] = d[k]; }
+    }
+    // real detail: the sharpest photo has far more than the blurriest (over a smooth
+    // background every photo is about as flat as the others, noise and all)
+    const detail = new Float32Array(N), DK4 = FILL_K ** 4;
+    for (let k = 0; k < N; k++) { const r = Fmax[k] / (Fmin[k] + 1e-12), r4 = isFinite(r) ? r ** 4 : 0; detail[k] = r4 / (r4 + DK4); }
+    const sorted = Float32Array.from(texMax.filter((_, k) => k % 7 === 0)).sort();
+    const lo = stats ? stats.lo : sorted[Math.floor(sorted.length * .35)], hi = stats ? stats.hi : sorted[Math.floor(sorted.length * .65)];
+    const sizes = pyrSizes(W, H);
+
+    // --- spill check. A photo focused behind a leg shows the leg blurred into a glow over the
+    //     background beside it (displaced, too, when the leg moved with parallax). The photo
+    //     with the leg sharp shows that background blurred but clean, and it is the photo with
+    //     the most detail nearby (the leg's crisp outline). Beside it (where that photo isn't
+    //     the sharp one itself), each photo's weight drops as its large-scale brightness
+    //     (blur radius ~4 px) parts from that clean photo's: a glow is a few percent of the
+    //     leg's brightness spread over the background; blurred texture barely moves it. ---
+    if (SPILL && n > 1) {
+      const kd = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * SPILL_R + 1, 2 * SPILL_R + 1));
+      const bestD = new Float32Array(NQ).fill(-1), cIdx = new Uint8Array(NQ), rc = new Float32Array(NQ), Lc = new Uint8Array(NQ);
+      const Fq = i => { const q = new cv.Mat(); cv.resize(Fh[i], q, quarter, 0, 0, cv.INTER_AREA); return q; };
+      for (let i = 0; i < n; i++) {
+        const q = Fq(i), gq = new cv.Mat(); cv.resize(weights[i], gq, quarter, 0, 0, cv.INTER_AREA);
+        const Q = q.data32F, G = gq.data; for (let k = 0; k < NQ; k++) if (G[k] < 128) Q[k] = 0;      // only where it is usable
+        const d = new cv.Mat(); cv.dilate(q, d, kd); const D = d.data32F;
+        for (let k = 0; k < NQ; k++) if (D[k] > bestD[k]) { bestD[k] = D[k]; cIdx[k] = i; }
+        q.delete(); d.delete(); gq.delete();
+      }
+      const fmq = new cv.Mat(); cv.resize(cv.matFromArray(hh, hw, cv.CV_32F, Fmax), fmq, quarter, 0, 0, cv.INTER_AREA); const FM = fmq.data32F;
+      for (let i = 0; i < n; i++) {
+        const q = Fq(i), Q = q.data32F, L = Lq[i].data;
+        for (let k = 0; k < NQ; k++) if (cIdx[k] === i) { rc[k] = Q[k] / (FM[k] + 1e-12); Lc[k] = L[k]; }
+        q.delete();
+      }
+      // only over smooth backgrounds, where a glow shows: over texture (bark, a leaf's veins)
+      // the photos' large-scale brightness differs anyway, and a glow hides in the texture
+      const dq = new cv.Mat(); cv.resize(cv.matFromArray(hh, hw, cv.CV_32F, detail), dq, quarter, 0, 0, cv.INTER_AREA); const cq = Float32Array.from(dq.data32F); dq.delete();
+      fmq.delete(); kd.delete();
+      const tau = SPILL_TAU * 255;
+      for (let i = 0; i < n; i++) {
+        const pq = new cv.Mat(qh, qw, cv.CV_32F), P = pq.data32F, L = Lq[i].data;
+        for (let k = 0; k < NQ; k++) {
+          if (cIdx[k] === i || rc[k] >= 0.5) { P[k] = 1; continue; }
+          const d = Math.abs(L[k] - Lc[k]) / tau, pen = d <= 1 ? 1 : d >= 3 ? 0 : (3 - d) / 2;
+          P[k] = 1 - (1 - pen) * (1 - cq[k]);
+        }
+        const ph = new cv.Mat(); cv.resize(pq, ph, half, 0, 0, cv.INTER_LINEAR); pq.delete();
+        const PH = ph.data32F, G = weights[i].data;
+        for (let k = 0; k < N; k++) G[k] = Math.round(G[k] * PH[k]);
+        ph.delete(); Lq[i].delete();
+      }
+    } else Lq.forEach(m => m.delete());
+
+    // --- halo guard. Next to a leg, a photo focused behind it shows the leg blurred into a
+    //     glow over the background, and one focused on the leg shows the background blurred.
+    //     A band of detail at level L reaches about 2^L px, so from HALO_FROM up each photo is
+    //     weighted by its worst relative sharpness within that reach (a min-pyramid): beside a
+    //     depth edge that favours the photos that are decent on both sides of it, so neither
+    //     the glow nor the blurred background lands there. Elsewhere it is the same photo as
+    //     at the spot itself. ---
+    const guard = [];
+    if (HALO_FROM <= LEVELS) {
+      const eps = Math.max(lo, 1e-8), k3 = cv.Mat.ones(3, 3, cv.CV_8U);
+      for (let i = 0; i < n; i++) {
+        const d = Fh[i].data32F;
+        let e = new cv.Mat(hh, hw, cv.CV_32F); const E = e.data32F;
+        for (let k = 0; k < N; k++) E[k] = Math.min(1, (d[k] + eps) / (Fmax[k] + eps));
+        const lv = [];
+        for (let L = 1; L <= LEVELS; L++) {
+          if (L > 1) {
+            const er = new cv.Mat(); cv.erode(e, er, k3); e.delete();
+            e = new cv.Mat(); cv.resize(er, e, new cv.Size(sizes[L][0], sizes[L][1]), 0, 0, cv.INTER_NEAREST); er.delete();
+          }
+          if (L >= HALO_FROM) { const u = new cv.Mat(); e.convertTo(u, cv.CV_8U, 255, 0); lv[L] = u; }
+        }
+        e.delete(); guard.push(lv);
+      }
+      k3.delete();
+    }
     for (let i = 0; i < n; i++) {
       const d = Fh[i].data32F, g = weights[i].data;
       for (let k = 0; k < N; k++) { const r = Math.min(1, d[k] / (Fmax[k] + 1e-9)); d[k] = r * r * r * r * g[k] / 255 + 1e-6; }
@@ -1485,13 +1581,29 @@
     }
     meanG.delete();
     normalise(Fh, N);
+    // --- fill. Over a smooth background (out-of-focus foliage, sky) no photo has detail, so
+    //     the sharpness weights there are noise and every photo gets a say, including those
+    //     with a nearby leg blurred into a glow over it. There, take the weights of the
+    //     nearest detail instead: next to a leg, the photo that has that leg sharp, which shows
+    //     the background beside it clean. Where there is detail, nothing changes. ---
+    if (FILL && n > 1) {
+      const conf = cv.matFromArray(hh, hw, cv.CV_32F, detail), CF = conf.data32F;
+      const den = new cv.Mat(); cv.GaussianBlur(conf, den, new cv.Size(0, 0), FILL_S, FILL_S); const DN = den.data32F;
+      for (let i = 0; i < n; i++) {
+        const w = Fh[i].data32F, t = new cv.Mat(hh, hw, cv.CV_32F), TT = t.data32F;
+        for (let k = 0; k < N; k++) TT[k] = w[k] * CF[k];
+        cv.GaussianBlur(t, t, new cv.Size(0, 0), FILL_S, FILL_S);
+        for (let k = 0; k < N; k++) if (DN[k] > 1e-3) w[k] = CF[k] * w[k] + (1 - CF[k]) * TT[k] / DN[k];
+        t.delete();
+      }
+      conf.delete(); den.delete();
+      normalise(Fh, N);
+    }
     if (debug) debug('weights', { width: hw, height: hh, maps: Fh.map(m => Float32Array.from(m.data32F)) });
 
     // --- texture mask (where detail is taken from the sharpest photos, not averaged) ---
     const tex = cv.matFromArray(H, W, cv.CV_32F, texMax);
     const tb = new cv.Mat(); cv.GaussianBlur(tex, tb, new cv.Size(0, 0), 25, 25);
-    const sorted = Float32Array.from(texMax.filter((_, k) => k % 7 === 0)).sort();
-    const lo = stats ? stats.lo : sorted[Math.floor(sorted.length * .35)], hi = stats ? stats.hi : sorted[Math.floor(sorted.length * .65)];
     const TM = new cv.Mat(H, W, cv.CV_32F), tm = TM.data32F, TB = tb.data32F;
     for (let k = 0; k < tm.length; k++) {
       const t = texMax[k] / (TB[k] + 1e-6);
@@ -1505,8 +1617,9 @@
 
     // --- pass 1: weighted pyramid at every level; at the fine levels, find the
     //     sharpest photo at each spot (and the noise level of each band) ---
-    const sizes = pyrSizes(W, H);
     const acc = sizes.map(([w, h]) => new Float32Array(w * h * 3));
+    const accH = sizes.map(([w, h], L) => L >= HALO_FROM ? new Float32Array(w * h * 3) : null);
+    const sumH = sizes.map(([w, h], L) => L >= HALO_FROM ? new Float32Array(w * h) : null);
     const bestE = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h).fill(-1));
     const bestC = sizes.slice(0, FINE).map(([w, h]) => new Float32Array(w * h * 3));
     const noise = stats ? stats.noise.slice() : new Array(FINE).fill(Infinity);
@@ -1524,6 +1637,15 @@
         const C = lp[L].data32F, Wt = gw[L].data32F, A = acc[L];
         for (let k = 0, p = 0; k < Wt.length; k++, p += 3) {
           const w = Wt[k]; A[p] += w * C[p]; A[p + 1] += w * C[p + 1]; A[p + 2] += w * C[p + 2];
+        }
+        if (L >= HALO_FROM) {
+          const gL = new cv.Mat(); cv.resize(weights[i], gL, new cv.Size(sizes[L][0], sizes[L][1]), 0, 0, cv.INTER_AREA);
+          const G = gL.data, Eg = guard[i][L].data, AH = accH[L], SH = sumH[L];
+          for (let k = 0, p = 0; k < G.length; k++, p += 3) {
+            const r = Eg[k] / 255, w = Math.pow(r, HALO_P) * G[k] / 255 + 1e-12;
+            AH[p] += w * C[p]; AH[p + 1] += w * C[p + 1]; AH[p + 2] += w * C[p + 2]; SH[k] += w;
+          }
+          gL.delete(); guard[i][L].delete();
         }
         if (L < FINE) {
           const e = bandEnergy(cv, lp[L]), E = e.data32F, C2 = lp[L].data32F;
@@ -1543,6 +1665,14 @@
       await tick();
     }
     Fh.forEach(m => m.delete());
+    for (let L = HALO_FROM; L <= LEVELS; L++) {
+      const A = acc[L], AH = accH[L], SH = sumH[L];
+      for (let k = 0, p = 0; k < SH.length; k++, p += 3) {
+        if (SH[k] < 1e-9) continue;                    // no photo has a say here: keep the plain blend
+        A[p] = AH[p] / SH[k]; A[p + 1] = AH[p + 1] / SH[k]; A[p + 2] = AH[p + 2] / SH[k];
+      }
+      accH[L] = sumH[L] = null;
+    }
 
     // --- pass 2: fine detail merged from every photo that is nearly as sharp as the
     //     best one at that spot and agrees with it. The single sharpest photo carries
@@ -1973,7 +2103,13 @@
 
   /** for helper workers: run tasks against their own handle on the shared scratch storage */
   function useStore(store) { STORE = store || MEM_STORE; }
-  const api = { stackFrames, planSize, heapNeedMiB, tasks, useStore, refCacheFree };
+  /** for experiments: the halo guard's first level (LEVELS + 1 = off) and exponent */
+  function tune(o) {
+    if ('haloFrom' in o) HALO_FROM = o.haloFrom; if ('haloP' in o) HALO_P = o.haloP;
+    if ('fill' in o) FILL = o.fill; if ('fillK' in o) FILL_K = o.fillK; if ('fillS' in o) FILL_S = o.fillS;
+    if ('spill' in o) SPILL = o.spill; if ('spillTau' in o) SPILL_TAU = o.spillTau; if ('spillR' in o) SPILL_R = o.spillR;
+  }
+  const api = { tune, stackFrames, planSize, heapNeedMiB, tasks, useStore, refCacheFree };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SalticidStacker = api;
 })(typeof self !== 'undefined' ? self : this);
