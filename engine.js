@@ -137,6 +137,8 @@
     const log = [];
     const say = m => { log.push(m); if (opts.onLog) opts.onLog(m); };
     const maxSide = opts.maxSide || 3000;
+    // the final unsharp mask: 0.35 unless the caller (the app) sharpens the result itself
+    const SHARPEN = opts.sharpen === undefined ? 0.35 : +opts.sharpen || 0;
     STORE = opts.store || MEM_STORE;
     const n = frames.length;
     if (n < 2) throw new Error('Add at least 2 photos of the same subject.');
@@ -365,7 +367,7 @@
     // Photos that could not be lined up are not offered.
     if (opts.onFrame) {
       const offer = [...Array(n).keys()].filter(i => keep[i] || !/lined up/.test(why[i]));
-      const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
+      const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, sharpen: SHARPEN, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
       // handed on in order, each as soon as it and those before it are ready
       const ready = new Array(ejobs.length); let next = 0, chain = Promise.resolve();
       await each('exportFrame', ejobs, (k, fr, j) => {
@@ -387,7 +389,7 @@
     let out;
     if (opts.stripRows && H > opts.stripRows) {
       // merged and finished a band at a time; then cropped to the box, as RGBA
-      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(at('merge', p), 'Merging'), tick, opts.stripRows, each);
+      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(at('merge', p), 'Merging'), tick, opts.stripRows, each, SHARPEN);
       unparkAll(weights);
       const data = new Uint8ClampedArray(box.w * box.h * 4);
       for (let y = 0; y < box.h; y++) {
@@ -401,8 +403,7 @@
     wMats.forEach(m => m.delete());
 
     // ---------- 7. finish ----------
-    const b = new cv.Mat(); cv.GaussianBlur(fused, b, sz(0, 0), 1.2, 1.2);
-    const sharp = new cv.Mat(); cv.addWeighted(fused, 1.35, b, -0.35, 0, sharp); b.delete(); fused.delete();
+    const sharp = sharpenF(cv, fused, SHARPEN); fused.delete();
     const crop = sharp.roi(new cv.Rect(box.x, box.y, box.w, box.h));
     const u8 = new cv.Mat(); crop.convertTo(u8, cv.CV_8U, 255, 0.5); crop.delete(); sharp.delete();
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
@@ -451,11 +452,20 @@
   }
 
   // ---------- helpers ----------
+  /** The engine's own final sharpening (unsharp mask, radius 1.2) of a float image, as a new Mat.
+      amount 0: a plain copy (the app sharpens the finished stack itself, so it can be adjusted). */
+  function sharpenF(cv, f, amount) {
+    const out = new cv.Mat();
+    if (!(amount > 0)) { f.copyTo(out); return out; }
+    const b = new cv.Mat(); cv.GaussianBlur(f, b, new cv.Size(0, 0), 1.2, 1.2);
+    cv.addWeighted(f, 1 + amount, b, -amount, 0, out); b.delete();
+    return out;
+  }
   /** One lined-up photo, cropped and sharpened like the stack, plus a small map of where it
       is sharp (and agrees with the reference) for "sharpest here". img: the parked photo,
       g8: its parked 8-bit grey. Worked a band of rows at a time; each band carries enough
       rows around it that the result is the same as doing the whole frame at once. */
-  function exportFrame(cv, img, g8, ghostHalf, box, info) {
+  function exportFrame(cv, img, g8, ghostHalf, box, info, amount = 0.35) {
     const W = img.cols, H = img.rows, m = 8, CTX = 24;
     const x0 = Math.max(0, box.x - m), x1 = Math.min(W, box.x + box.w + m);
     const data = new Uint8ClampedArray(box.w * box.h * 4);
@@ -465,8 +475,10 @@
       // sharpened colour: blur radius 4, so 8 rows either side are plenty
       const y0 = Math.max(0, box.y + by - m), y1 = Math.min(H, box.y + b1 + m);
       const rows = unpark(cv, img, y0, y1), big = rows.roi(new cv.Rect(x0, 0, x1 - x0, y1 - y0));
-      const bl = new cv.Mat(); cv.GaussianBlur(big, bl, new cv.Size(0, 0), 1.2, 1.2);
-      const sh = new cv.Mat(); cv.addWeighted(big, 1.35, bl, -0.35, 0, sh); bl.delete(); big.delete(); rows.delete();
+      const sh = new cv.Mat();
+      if (amount > 0) { const bl = new cv.Mat(); cv.GaussianBlur(big, bl, new cv.Size(0, 0), 1.2, 1.2); cv.addWeighted(big, 1 + amount, bl, -amount, 0, sh); bl.delete(); }
+      else big.copyTo(sh);
+      big.delete(); rows.delete();
       const c = sh.roi(new cv.Rect(box.x - x0, box.y + by - y0, box.w, b1 - by));
       const rgba = new cv.Mat(); cv.cvtColor(c, rgba, cv.COLOR_RGB2RGBA); c.delete(); sh.delete();
       data.set(rgba.data, by * box.w * 4); rgba.delete();
@@ -1611,7 +1623,7 @@
       band noise) are measured on the whole frame first. The per-photo measurements and the
       strips are tasks (each() runs them, side by side when it can). Returns the finished 8-bit
       RGB frame. */
-  async function fuseStrips(cv, imgs8, weights, valid, progress, tick, maxRows, each) {
+  async function fuseStrips(cv, imgs8, weights, valid, progress, tick, maxRows, each, sharpen = 0.35) {
     const n = imgs8.length, W = imgs8[0].cols, H = imgs8[0].rows, CF = STRIP_CF;
     const spans = stripSpans(H, maxRows);
     // --- pre-pass 1: texture thresholds from the sharpest fine detail at every 7th pixel ---
@@ -1646,7 +1658,7 @@
     };
     let placed = 0;
     const partial = new Array(spans.length).fill(0), show = () => progress(0.16 + 0.84 * spans.reduce((a, sp, k) => a + (sp.e1 - sp.e0) * partial[k], 0) / rowsAll);
-    await each('strip', spans.map((sp, s) => ({ s, sp, last: s === spans.length - 1, W, H, imgs: imgs8, weights, valid, stats: { lo, hi, noise } })), (k, r, s) => {
+    await each('strip', spans.map((sp, s) => ({ s, sp, last: s === spans.length - 1, W, H, imgs: imgs8, weights, valid, stats: { lo, hi, noise }, sharpen })), (k, r, s) => {
       partial[s] = 1; show();
       sres[s] = r;
       while (placed < spans.length && sres[placed]) place(placed++, sres[placed - 1]);
@@ -1822,7 +1834,7 @@
     /** one lined-up photo cropped and finished like the stack, for the retouch brush */
     exportFrame(cv, a) {
       const u8 = unpark(cv, a.usable), uF = f32(cv, u8); u8.delete();
-      const fr = exportFrame(cv, a.img, a.g8, uF, a.box, a.info); uF.delete();
+      const fr = exportFrame(cv, a.img, a.g8, uF, a.box, a.info, a.sharpen); uF.delete();
       return fr;
     },
     /** one photo's sharpest fine detail at every 7th pixel (texture thresholds for the merge) */
@@ -1865,8 +1877,7 @@
       const ws = a.weights.map(p => unpark(cv, p, e0 / 2, Math.ceil(e1 / 2)));
       const fused = await fuseHybrid(cv, views, ws, vv, report, () => Promise.resolve(), null, a.stats);
       ws.forEach(m => m.delete());
-      const b = new cv.Mat(); cv.GaussianBlur(fused, b, new cv.Size(0, 0), 1.2, 1.2);
-      cv.addWeighted(fused, 1.35, b, -0.35, 0, b); fused.delete();
+      const b = sharpenF(cv, fused, a.sharpen === undefined ? 0.35 : a.sharpen); fused.delete();
       const S = b.data32F;
       const plainStart = s ? y0 + CF : 0, plainEnd = last ? H : y1 - CF;
       const plain = new Uint8Array(Math.max(0, plainEnd - plainStart) * row);
