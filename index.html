@@ -88,6 +88,11 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
 @media (prefers-reduced-motion: reduce) { .eyes i { animation: none; } .bar > i { transition: none; } }
 .meta { margin: 0; font-size: .9rem; color: var(--muted); }
 .meta.warn { color: var(--warn); }
+.sharp { display: flex; flex-direction: column; gap: 6px; }
+.sharp-head { display: flex; justify-content: space-between; align-items: baseline; font-size: .95rem; }
+.sharp-head output { font-family: var(--font-mono); color: var(--accent); font-variant-numeric: tabular-nums; }
+.sharp input[type=range] { width: 100%; accent-color: var(--accent); }
+.sharp canvas { width: 100%; height: 200px; border-radius: 12px; background: var(--line); touch-action: none; cursor: grab; display: block; }
 
 /* retouch: a full-screen editor over the app */
 body.rt-open { overflow: hidden; }
@@ -171,6 +176,12 @@ body.rt-open { overflow: hidden; }
       <figcaption id="resultInfo"></figcaption>
     </figure>
     <p class="meta warn" id="sizeNote" hidden></p>
+    <div class="sharp" id="sharpBox">
+      <div class="sharp-head"><label for="sharp">Sharpening</label><output id="sharpVal" for="sharp">70%</output></div>
+      <input type="range" id="sharp" min="0" max="150" step="5" value="70" aria-describedby="sharpNote">
+      <canvas id="loupe" role="img" aria-label="Close-up at full size, sharpened as set. Drag to look around."></canvas>
+      <p class="meta" id="sharpNote">Close-up at full size: drag it to look around. Your setting is kept for the next stacks.</p>
+    </div>
     <p class="note" id="savedNote"></p>
     <p class="meta" id="metaNote" hidden></p>
     <div id="selection" hidden><ul class="left" id="leftList"></ul></div>
@@ -214,6 +225,7 @@ body.rt-open { overflow: hidden; }
 </section>
 
 <script src="exif.js"></script>
+<script src="sharpen.js"></script>
 <script src="retouch.js"></script>
 
 <script>
@@ -221,7 +233,9 @@ body.rt-open { overflow: hidden; }
   const $ = id => document.getElementById(id);
   const S = { pick: $('pick'), chosen: $('chosen'), work: $('work'), done: $('done') };
   let files = [], busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
-  let rtFrames = [], stackPixels = null, autoPixels = null, refPhoto = 0;
+  // basePixels: the stack (with any retouching) before the final sharpening; autoBase: the
+  // automatic stack, the retouch editor's "Stack" source
+  let rtFrames = [], basePixels = null, autoBase = null, refPhoto = 0;
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 
   // ---------- install / service worker ----------
@@ -359,7 +373,7 @@ body.rt-open { overflow: hidden; }
   }
   async function run() {
     if (busy || files.length < 2 || !ready) return;
-    busy = true; refreshGo(); result = null; rtFrames = []; stackPixels = autoPixels = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
+    busy = true; refreshGo(); result = null; rtFrames = []; basePixels = autoBase = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
@@ -416,7 +430,90 @@ body.rt-open { overflow: hidden; }
     }
     el.hidden = false;
   }
-  const toJpeg = c => new Promise(r => c.toBlob(r, 'image/jpeg', 0.95));
+  // ---------- the saved JPEG: final sharpening + full colour detail, in finish.js ----------
+  let finisher = null, finSeq = 0;
+  const finWait = new Map();
+  function makeJpeg(px, amount) {
+    return new Promise((resolve, reject) => {
+      if (!finisher) {
+        finisher = new Worker('finish.js');
+        finisher.onmessage = e => { const j = finWait.get(e.data.id); finWait.delete(e.data.id); if (j) e.data.error ? j.reject(new Error(e.data.error)) : j.resolve(e.data.jpeg); };
+        finisher.onerror = e => { e.preventDefault(); finWait.forEach(j => j.reject(new Error('The JPEG step stopped.'))); finWait.clear(); finisher = null; };
+      }
+      const id = ++finSeq, copy = new Uint8ClampedArray(px.data);
+      finWait.set(id, { resolve, reject });
+      finisher.postMessage({ id, data: copy, width: px.width, height: px.height, amount, quality: 95 }, [copy.buffer]);
+    }).then(b => new Blob([b], { type: 'image/jpeg' }), () => {
+      // fallback: the browser's encoder (colour at half resolution), still sharpened as set
+      const c = document.createElement('canvas'); c.width = px.width; c.height = px.height;
+      c.getContext('2d').putImageData(new ImageData(SpoodSharpen.image(px.data, px.width, px.height, amount), px.width, px.height), 0, 0);
+      return new Promise(r => c.toBlob(b => { c.width = c.height = 0; r(b); }, 'image/jpeg', 0.95));
+    });
+  }
+
+  // ---------- sharpening: the slider, and a close-up at full size ----------
+  const SHARP_KEY = 'spood-sharpen';
+  let sharpAmt = Math.round(SpoodSharpen.DEFAULT * 100);
+  try { const v = localStorage.getItem(SHARP_KEY); if (v !== null && isFinite(+v)) sharpAmt = Math.max(0, Math.min(150, +v)); } catch (e) { /* private mode */ }
+  const amount = () => sharpAmt / 100;
+  $('sharp').value = sharpAmt; $('sharpVal').textContent = sharpAmt + '%';
+  let loupeAt = null, resultAmt = null, refinish = null;
+  /** where the close-up starts: the most detailed spot (by brightness changes, every 8th pixel) */
+  function busiestSpot(px, w, h) {
+    const W = px.width, H = px.height, D = px.data, st = 8, gw = Math.floor(W / st), gh = Math.floor(H / st);
+    const e = new Float32Array(gw * gh), lum = (x, y) => { const p = (y * W + x) * 4; return D[p] * 0.299 + D[p + 1] * 0.587 + D[p + 2] * 0.114; };
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) { const x = i * st, y = j * st; e[j * gw + i] = Math.abs(lum(x + 1, y) - lum(x, y)) + Math.abs(lum(x, y + 1) - lum(x, y)); }
+    const bw = Math.max(1, Math.floor(w / st)), bh = Math.max(1, Math.floor(h / st));
+    let best = -1, bx = 0, by = 0;
+    for (let j = 0; j + bh <= gh; j += 2) for (let i = 0; i + bw <= gw; i += 2) {
+      let s = 0; for (let y = j; y < j + bh; y += 2) for (let x = i; x < i + bw; x += 2) s += e[y * gw + x];
+      if (s > best) { best = s; bx = i * st; by = j * st; }
+    }
+    return { x: bx, y: by };
+  }
+  function drawLoupe() {
+    const cv = $('loupe'), px = basePixels;
+    if (!px || S.done.hidden) return;
+    const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    const w = Math.min(px.width, Math.ceil(r.width)), h = Math.min(px.height, Math.ceil(r.height));   // one image pixel per CSS pixel
+    if (!loupeAt) loupeAt = busiestSpot(px, w, h);
+    loupeAt.x = Math.max(0, Math.min(px.width - w, loupeAt.x)); loupeAt.y = Math.max(0, Math.min(px.height - h, loupeAt.y));
+    const t = SpoodSharpen.tile(px.data, px.width, px.height, amount(), loupeAt.x, loupeAt.y, loupeAt.x + w, loupeAt.y + h);
+    const off = new OffscreenCanvas(w, h); off.getContext('2d').putImageData(new ImageData(t, w, h), 0, 0);
+    const g = cv.getContext('2d'); g.imageSmoothingEnabled = false;
+    g.drawImage(off, 0, 0, w, h, 0, 0, w * dpr, h * dpr);
+  }
+  (() => {
+    const cv = $('loupe'); let drag = null;
+    cv.addEventListener('pointerdown', e => { cv.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY }; });
+    cv.addEventListener('pointermove', e => {
+      if (!drag || !loupeAt) return;
+      loupeAt.x -= e.clientX - drag.x; loupeAt.y -= e.clientY - drag.y; drag = { x: e.clientX, y: e.clientY };
+      requestAnimationFrame(drawLoupe);
+    });
+    const up = () => { drag = null; };
+    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    addEventListener('resize', () => requestAnimationFrame(drawLoupe));
+  })();
+  $('sharp').addEventListener('input', () => { sharpAmt = +$('sharp').value; $('sharpVal').textContent = sharpAmt + '%'; requestAnimationFrame(drawLoupe); });
+  $('sharp').addEventListener('change', async () => {
+    try { localStorage.setItem(SHARP_KEY, String(sharpAmt)); } catch (e) { /* private mode */ }
+    if (!basePixels || !result || resultAmt === sharpAmt) return;
+    if (refinish) return;                       // one at a time; the loop picks up the latest value
+    refinish = (async () => {
+      while (basePixels && resultAmt !== sharpAmt) {
+        const a = sharpAmt;
+        $('savedNote').textContent = 'Applying the new sharpening…';
+        const b = await makeJpeg(basePixels, a / 100);
+        resultAmt = a;
+        await setResult(b, result.name, basePixels.width, basePixels.height);
+      }
+      $('savedNote').textContent = 'Sharpening changed. Tap Save again to save this version.';
+      $('save').classList.add('primary'); $('save').classList.remove('ghost');
+    })().finally(() => { refinish = null; });
+  });
+
   async function setResult(blob, name, w, h) {
     if (result) URL.revokeObjectURL(result.url);
     const b = await withExif(blob, w, h);
@@ -428,11 +525,9 @@ body.rt-open { overflow: hidden; }
 
   async function finish(out) {
     refPhoto = out.ref || 0;
-    const c = document.createElement('canvas'); c.width = out.width; c.height = out.height;
-    stackPixels = autoPixels = new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height);
-    c.getContext('2d').putImageData(stackPixels, 0, 0);
-    const b = await toJpeg(c);
-    c.width = c.height = 0;
+    basePixels = autoBase = new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height);
+    loupeAt = null; resultAmt = sharpAmt;
+    const b = await makeJpeg(basePixels, amount());
     await setResult(b, `spood-stack-${stamp()}.jpg`, out.width, out.height);
     const secs = Math.round((performance.now() - t0) / 1000);
     const used = $('selection').dataset.used || files.length;
@@ -445,6 +540,7 @@ body.rt-open { overflow: hidden; }
     setProgress(1, 'Done');
     stackFinished();
     S.work.hidden = true; S.done.hidden = false;
+    requestAnimationFrame(drawLoupe);
     $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
     save();
     done();
@@ -454,19 +550,21 @@ body.rt-open { overflow: hidden; }
   // ---------- retouch ----------
   window.__rtFramesForTest = () => rtFrames;          // read by tests/retouch_effect.py
   $('retouchBtn').addEventListener('click', () => {
-    if (!stackPixels || !rtFrames.length) return;
+    if (!basePixels || !rtFrames.length) return;
     history.pushState({ rt: true }, '');                  // so Android's back gesture closes the editor
     const leave = () => { if (history.state && history.state.rt) history.back(); };
     window.spoodRetouchSession = SpoodRetouch.open({
-      root: $('retouch'), stack: stackPixels, auto: autoPixels, frames: rtFrames,
+      root: $('retouch'), stack: basePixels, auto: autoBase, frames: rtFrames, sharpen: amount(),
       onCancel: leave,
       onDone: async (canvas, changed) => {
         leave();
         if (!changed) return;
-        const b = await toJpeg(canvas);
-        stackPixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+        basePixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
         canvas.width = canvas.height = 0;
-        await setResult(b, result.name.replace(/(-retouched)?\.jpg$/, '-retouched.jpg'), stackPixels.width, stackPixels.height);
+        resultAmt = sharpAmt;
+        const b = await makeJpeg(basePixels, amount());
+        await setResult(b, result.name.replace(/(-retouched)?\.jpg$/, '-retouched.jpg'), basePixels.width, basePixels.height);
+        requestAnimationFrame(drawLoupe);
         save();
       }
     });
@@ -476,6 +574,7 @@ body.rt-open { overflow: hidden; }
     const a = document.createElement('a'); a.href = result.url; a.download = result.name;
     document.body.appendChild(a); a.click(); a.remove();
     $('savedNote').textContent = `Saved to Downloads as ${result.name}. Tap the picture to open it full size.`;
+    $('save').classList.add('ghost'); $('save').classList.remove('primary');
   }
   function fail(m) {
     const oom = /memory|alloc|abort|OOM/i.test(m);
@@ -524,7 +623,7 @@ body.rt-open { overflow: hidden; }
     if (!rt.hidden) history.pushState({ rt: true }, '');
   });
   $('again').addEventListener('click', () => {
-    files = []; rtFrames = []; stackPixels = autoPixels = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
+    files = []; rtFrames = []; basePixels = autoBase = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
     $('selection').hidden = true; delete $('selection').dataset.used;
   });
   addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });

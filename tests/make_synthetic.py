@@ -90,6 +90,16 @@ def night(rng):
     return Part(col.astype(np.float32), np.ones((H, W), np.float32), depth.astype(np.float32))
 
 
+def bokeh(rng):
+    """Far foliage well behind the subject: blurred in every photo (smooth greens and yellow
+    light), the usual backdrop of a macro shot. Halos show most against it."""
+    t = fractal(rng, H, W, 4, 2)
+    u = fractal(rng, H, W, 3, 2)
+    v = 0.30 + 0.12 * t
+    col = np.dstack([v * 0.55 + 0.10 * np.clip(u, 0, None), v * 0.95 + 0.06 * np.clip(u, 0, None), v * 0.35]).clip(0, 1)
+    return Part(col.astype(np.float32), np.ones((H, W), np.float32), np.full((H, W), 1.4, np.float32))
+
+
 def setae(rng, mask, base, n, length, shade):
     """Hairy texture: many short thin antialiased strokes inside the mask."""
     img = np.zeros((H, W, 3), np.float32)
@@ -296,6 +306,10 @@ SCENES = {
     # flash at night: black background all round the subject (must not be taken for the clamp)
     'night': dict(n=7, f=(0.14, 0.62), lean=0.05, par=0.06, orient=1, seed=17, moved=None, bg='night', drift=60,
                   legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # far foliage behind: blurred in every photo, so only the subject has detail (the common case)
+    'bokeh': dict(n=8, f=(0.10, 0.70), lean=0.05, par=0.08, orient=1, seed=31, moved=None, bg='bokeh',
+                  legs=[(0.30, 0.10), (0.35, 0.70), (0.30, 0.15), (0.40, 0.75),
+                        (0.30, 0.08), (0.35, 0.68), (0.32, 0.12), (0.40, 0.72)]),
     # spider on an insect screen: repeating texture behind a subject with parallax
     'mesh': dict(n=8, f=(0.14, 0.66), lean=0.05, par=0.07, orient=1, seed=5, moved=None, bg='mesh',
                  legs=[(0.30, 0.10), (0.35, 0.70), (0.30, 0.15), (0.40, 0.75),
@@ -306,7 +320,7 @@ SCENES = {
 def make(name):
     sc = SCENES[name]
     rng = np.random.default_rng(sc['seed'])
-    bg = mesh(rng) if sc.get('bg') == 'mesh' else night(rng) if sc.get('bg') == 'night' else bark(rng)
+    bg = mesh(rng) if sc.get('bg') == 'mesh' else night(rng) if sc.get('bg') == 'night' else bokeh(rng) if sc.get('bg') == 'bokeh' else bark(rng)
     base = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'])
     moved = spider(np.random.default_rng(sc['seed'] + 100), W * 0.47, H * 0.42, 210, sc['legs'],
                    shift=sc['moved']) if sc['moved'] else None
