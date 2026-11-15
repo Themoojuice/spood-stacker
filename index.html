@@ -192,9 +192,11 @@ body.rt-open { overflow: hidden; }
       <button class="ghost" id="save">Save again</button>
       <button class="ghost" id="share" hidden>Share…</button>
       <button class="ghost" id="again">Stack more</button>
+      <button class="ghost" id="close">Close app</button>
     </div>
   </section>
 
+  <p class="engine" id="closedNote" hidden>Memory cleared. Swipe Spood Stacker away in Recents to close it.</p>
   <p class="engine" id="engine">Stacking engine: loading…</p>
   <p class="engine" id="coresNote" hidden><span id="coresWhy"></span><button class="linkbtn" id="coresReset" type="button">Use all cores</button></p>
 </main>
@@ -389,7 +391,7 @@ body.rt-open { overflow: hidden; }
   }
   async function run() {
     if (busy || files.length < 2 || !ready) return;
-    busy = true; refreshGo(); result = null; rtFrames = []; basePixels = autoBase = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
+    busy = true; refreshGo(); $('closedNote').hidden = true; result = null; rtFrames = []; basePixels = autoBase = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
@@ -586,8 +588,10 @@ body.rt-open { overflow: hidden; }
       }
     });
   });
+  let lastSaveAt = 0;
   function save() {
     if (!result) return;
+    result.saved = true; lastSaveAt = performance.now();
     const a = document.createElement('a'); a.href = result.url; a.download = result.name;
     document.body.appendChild(a); a.click(); a.remove();
     $('savedNote').textContent = `Saved to Downloads as ${result.name}. Tap the picture to open it full size.`;
@@ -643,6 +647,24 @@ body.rt-open { overflow: hidden; }
     files = []; rtFrames = []; basePixels = autoBase = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
     $('selection').hidden = true; delete $('selection').dataset.used;
   });
+  // Close app: make sure the version on screen is saved, hand all memory back (stacking engine,
+  // picture, retouch frames), then close. Where the browser won't let a page close itself, it
+  // reloads to a fresh start screen instead, which frees the same memory.
+  $('close').addEventListener('click', async () => {
+    if (busy || refinish) return;
+    $('close').disabled = true; $('close').textContent = 'Closing…';
+    if (result && !result.saved) save();
+    const wait = 1500 - (performance.now() - lastSaveAt);      // let a fresh download finish first
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    try { worker?.terminate(); } catch (e) {}
+    worker = null; ready = false;
+    if (result) URL.revokeObjectURL(result.url);
+    result = null; files = []; rtFrames = []; basePixels = autoBase = null;
+    try { sessionStorage.setItem('spood-closed', '1'); } catch (e) {}
+    window.close();
+    setTimeout(() => location.replace(new URL('./', location.href).href), 400);
+  });
+  try { if (sessionStorage.getItem('spood-closed')) { sessionStorage.removeItem('spood-closed'); $('closedNote').hidden = false; } } catch (e) {}
   addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });
 })();
 </script>
