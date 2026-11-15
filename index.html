@@ -85,6 +85,8 @@ figcaption { color: var(--muted); font-size: .9rem; }
 ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem; }
 .tag { align-self: flex-start; font: 500 .72rem/1 var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 5px 9px; }
 .engine { font: 12px/1.4 var(--font-mono); color: var(--muted); margin: 0; }
+#coresNote { margin-top: 6px; }
+.linkbtn { font: inherit; color: var(--accent); background: none; border: 0; padding: 4px 0; text-decoration: underline; display: inline; border-radius: 0; }
 @media (prefers-reduced-motion: reduce) { .eyes i { animation: none; } .bar > i { transition: none; } }
 .meta { margin: 0; font-size: .9rem; color: var(--muted); }
 .meta.warn { color: var(--warn); }
@@ -194,6 +196,7 @@ body.rt-open { overflow: hidden; }
   </section>
 
   <p class="engine" id="engine">Stacking engine: loading…</p>
+  <p class="engine" id="coresNote" hidden><span id="coresWhy"></span><button class="linkbtn" id="coresReset" type="button">Use all cores</button></p>
 </main>
 
 <section id="retouch" class="retouch" hidden aria-label="Retouch">
@@ -349,24 +352,37 @@ body.rt-open { overflow: hidden; }
   let lastSide = 0, retrySide = 0, plan = null, oneCore = false, lastHelpers = 0;
   // If a stack never finished (the browser closed the tab mid-stack, likely for memory), the
   // next ones use fewer cores at once: 2 helpers after one such stack, one core after two.
-  let coresCap = Infinity;
+  // Only a stack that died while the app was ON SCREEN counts: Android closes background tabs
+  // (switched app, screen off) whatever their memory use, so those say nothing about cores.
+  // Every stack that finishes steps straight back up one level (one core → 2 → all).
+  let coresCap = Infinity, cutShort = 0;
+  const capFor = cut => cut >= 2 ? 0 : cut === 1 ? 2 : Infinity;
   try {
-    let cut = +localStorage.getItem('spood-cut-short') || 0;
-    if (localStorage.getItem('spood-running')) { cut++; localStorage.setItem('spood-cut-short', String(cut)); localStorage.removeItem('spood-running'); }
-    coresCap = cut >= 2 ? 0 : cut === 1 ? 2 : Infinity;
+    cutShort = Math.min(2, +localStorage.getItem('spood-cut-short') || 0);
+    if (localStorage.getItem('spood-running') === '1') cutShort = Math.min(2, cutShort + 1);
+    localStorage.setItem('spood-cut-short', String(cutShort));
+    localStorage.removeItem('spood-running'); localStorage.removeItem('spood-ok-since-cut');
+    coresCap = capFor(cutShort);
   } catch (e) { /* private mode */ }
   // closing the app or leaving the page on purpose doesn't count as cut short
   addEventListener('pagehide', () => { try { localStorage.removeItem('spood-running'); } catch (e) {} });
-  // ten good stacks after being cut short: one step back towards all cores
-  function stackFinished() {
-    try {
-      const cut = +localStorage.getItem('spood-cut-short') || 0;
-      if (!cut) return;
-      const ok = (+localStorage.getItem('spood-ok-since-cut') || 0) + 1;
-      if (ok >= 10) { localStorage.setItem('spood-cut-short', String(cut - 1)); localStorage.setItem('spood-ok-since-cut', '0'); }
-      else localStorage.setItem('spood-ok-since-cut', String(ok));
-    } catch (e) { /* private mode */ }
+  // off screen mid-stack: a kill from here on isn't the cores' fault
+  document.addEventListener('visibilitychange', () => {
+    if (!busy) return;
+    try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) {}
+  });
+  function setCut(n) {
+    cutShort = n; coresCap = capFor(n);
+    try { localStorage.setItem('spood-cut-short', String(n)); } catch (e) {}
+    coresNote();
   }
+  function coresNote() {
+    $('coresNote').hidden = !cutShort;
+    if (cutShort) $('coresWhy').textContent = `Using ${coresCap ? coresCap + ' cores' : 'one core'} because ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen (slower, but safer on memory). `;
+  }
+  $('coresReset').addEventListener('click', () => setCut(0));
+  coresNote();
+  function stackFinished() { if (cutShort) setCut(cutShort - 1); }
   function gotPlan(p) {
     plan = p; lastSide = p.side; lastHelpers = p.helpers || 0;
     log(`working size ${p.width}×${p.height}` + (p.shrunk ? ` (photos are ${p.nativeSide} px on the long side; shrunk to fit memory)` : ''));
@@ -388,7 +404,8 @@ body.rt-open { overflow: hidden; }
       // the files themselves go to the engine, which decodes each photo only when it gets to it
       const taken = [];
       for (const f of files) taken.push(await takenOf(f));
-      try { localStorage.setItem('spood-running', '1'); } catch (e) { /* private mode */ }
+      try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) { /* private mode */ }
+      if (cutShort) log(`fewer cores: ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen`);
       worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas) } });
     } catch (e) { fail(e.message || String(e)); }
   }
