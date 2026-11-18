@@ -13,9 +13,14 @@
          side (only used when the store is shareable);
          onFrame(frame) - optional; receives each lined-up photo cropped and finished
          like the stack ({photo, used, why, ref, width, height, data, focus}) for retouching.
+         tame: wet or shiny subject - relight each photo to the reference's lighting, look past
+         glare when judging movement, keep photos whose features line up well even when the
+         fine-tune disagrees, and prefer a photo without glare where another has it (see
+         tameShine).
          onDebug(name, data) - optional, for the test tools: 'lined' / 'flowed' (the lined-up
          photos before / after local correction, plus trust maps), 'weights' (each used
-         photo's share of the stack, half size), 'merged' (photos merged per spot).
+         photo's share of the stack, half size), 'merged' (photos merged per spot), 'usable'
+         (where each photo may contribute, half size), 'shine' (opts.tame: glare maps).
    ref: 1-based number of the reference photo (the stack has its geometry and EXIF).  */
 (function (root) {
   'use strict';
@@ -211,6 +216,9 @@
     // chain from the reference towards each end of the focus order, the two chains side by side.
     const srcPx = frames.map(f => f.srcPixels || f.width * f.height);
     const maskP = park(cv, masks[0].clone());            // the clamp mask (the same for every photo)
+    // shiny subjects: local contrast evened out first, so detail in shade and beside glare is
+    // found and matched as readily as detail in the light (about twice the matches)
+    if (opts.tame) for (const g of gray) { const c = new cv.CLAHE(2.0, new cv.Size(8, 8)); c.apply(g, g); c.delete(); }
     const gd = gray.map(g => ({ data: new Uint8Array(g.data), rows: g.rows, cols: g.cols }));
     gray.forEach(g => g.delete());
     const fts = await each('features', gd.map(g => ({ g, mask: maskP, pre })), k => progress(at('align', 0.2 * k / n), 'Lining up photos'));
@@ -218,8 +226,8 @@
     const lens = [refPos, n - 1 - refPos], part = [0, 0];
     const cres = await each('chain', chainArgs, () => {}, (c, f) => { part[c] = f * lens[c]; progress(at('align', 0.2 + 0.8 * (part[0] + part[1]) / Math.max(1, n - 1)), 'Lining up photos'); });
     const Hs = new Array(n); Hs[ref] = eye3();
-    const inl = new Array(n).fill(9999), eccOk = new Array(n).fill(true);
-    for (const r of cres) { for (const [i, h, nI, ok] of r.done) { Hs[i] = h; inl[i] = nI; eccOk[i] = ok; } r.logs.forEach(say); }
+    const inl = new Array(n).fill(9999), eccOk = new Array(n).fill(true), rough = new Array(n).fill(false);
+    for (const r of cres) { for (const [i, h, nI, ok, rg] of r.done) { Hs[i] = h; inl[i] = nI; eccOk[i] = ok; rough[i] = !!rg; } r.logs.forEach(say); }
     gd.length = 0; fts.length = 0;
     // warped a band of rows at a time, straight into the parked copy (each output row depends
     // only on the line-up, so the bands join exactly)
@@ -248,6 +256,16 @@
     progress(at('prep', 0.35), 'Correcting movement');
     covShare.forEach((c, i) => { if (i !== ref && c < 0.97) say(`photo ${i + 1}: covers ${Math.round(c * 100)}% of the reference's view`); });
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2);
+
+    // ---------- 3c. shiny subjects (opts.tame): lighting matched, glare found ----------
+    let shine = null;
+    if (opts.tame) {
+      shine = await tameShine(cv, warped, ref, W, H, each);
+      shine.logs.forEach(say);
+      if (opts.onDebug) opts.onDebug('shine', shine);
+      const glary = shine.share.filter(s => s > 0.001).length;
+      say(glary ? `glare found in ${glary} photo${glary > 1 ? 's' : ''}; taken from photos without it where possible` : 'no glare to work around');
+    }
 
     // ---------- 4. local alignment, decided pixel by pixel ----------
     // The flow is worked out both ways (reference → photo and back). Where the two
@@ -294,6 +312,10 @@
     const inlBest = inlOthers.length ? Math.max(...inlOthers) : 0;
     for (let i = 0; i < n; i++) {
       if (i === ref || !keep[i] || eccOk[i]) continue;
+      // shiny subjects: moved glare, shadows and light pull the fine-tune off a line-up its
+      // features agree on; with a solid feature fit, keep that and let the checks below (which
+      // look past glare) judge where the photo can be used
+      if (opts.tame && inl[i] >= 40 && !rough[i]) { say(`photo ${i + 1}: lined up from its ${inl[i]} matched features (the fine-tune disagreed)`); continue; }
       if (inl[i] < WEAK_MATCH * inlBest) {
         keep[i] = false;
         why[i] = moment.apart[i] ? `taken ${gapText(moment.apart[i])} the others, and the subject had moved`
@@ -303,7 +325,8 @@
     // each photo's measurements for the choices below (thumbnails, agreement with the reference,
     // what it may contribute), worked out side by side when there are helpers
     const qs = Math.min(0.25, 1000 / Math.max(W, H));     // quarter size, at most 1000 px across
-    const sres = await each('select', [...Array(n).keys()].map(i => ({ wg: wg[i], wm: wmask[i], trust: trust[i], wgRef: wg[ref], key: refKey, W, H, hw, hh, qs, judge: i !== ref })),
+    const sres = await each('select', [...Array(n).keys()].map(i => ({ wg: wg[i], wm: wmask[i], trust: trust[i], wgRef: wg[ref], key: refKey, W, H, hw, hh, qs, judge: i !== ref,
+      shine: shine ? { aw: shine.aw, ah: shine.ah, E: shine.E[i], D: shine.D[i] } : null })),
       k => progress(at('select', 0.85 * k / n), 'Choosing photos'));
     for (let i = 0; i < n; i++) { STORE.drop(trust[i].h); trust[i] = null; }
     // (b) near-duplicates: keep the higher-resolution (then sharper) copy.
@@ -336,9 +359,10 @@
         const gap = moment.apart[i];
         if (opts.keepAll) { /* test hook: judge nothing here */ }
         else if (r.m < 0.25) { keep[i] = false; why[i] = 'the spider moved too much in it'; }
-        else if (r.sm < SUBJECT_MOVED) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; }
+        else if (r.sm < (opts.tame ? SUBJECT_MOVED_TAME : SUBJECT_MOVED)) { keep[i] = false; why[i] = gap ? `taken ${gapText(gap)} the others, and the subject had moved` : 'the subject moved between photos'; if (opts.tame) say(`photo ${i + 1}: agrees with the reference ${r.sm.toFixed(2)} where sharp (needs ${SUBJECT_MOVED_TAME})`); }
         else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others; used wherever it matches`);
       }
+      if (opts.onDebug) opts.onDebug('usable', { i, hw, hh, usable: Uint8Array.from(r.usable) });
       usable[i] = parkData(r.usable, hh, hw, cv.CV_8U, 1);  // 8-bit (0..1 in 1/255 steps), parked
       r.usable = r.maskT = null;
     }
@@ -420,6 +444,7 @@
   // ---------- photo-selection thresholds ----------
   const MOMENT_GAP = 2000;          // ms between consecutive photos that starts a new "moment"
   const WEAK_MATCH = 0.25;          // fewer than this share of the best photo's matches, and no fine-tune
+  const SUBJECT_MOVED_TAME = 0.5;   // the same with opts.tame: glare and light are looked past; a big change of viewpoint (parallax) is left to the per-spot checks
   const SUBJECT_MOVED = 0.65;       // subject agreement below this: moved (real bursts 0.96+, a photo shot from a step to the side 0.76, weevil 0.38)
   const REPEAT = 0.4;               // repeat score above this: a mesh-like pattern is in view (mesh 0.7-1.4, others <= 0.17)
 
@@ -509,7 +534,7 @@
   /** How well a photo agrees with the reference where either of them is sharp
       (the subject), 0..1. The frame-wide mean is dominated by background, so a
       small subject that walked off barely moves it; this weights by sharpness. */
-  function subjectAgreement(cv, refG, curG, ghostHalf, coverHalf) {
+  function subjectAgreement(cv, refG, curG, ghostHalf, coverHalf, lookPastHalf) {
     const sz = new cv.Size(ghostHalf.cols, ghostHalf.rows);
     const half = g => {
       if (g.cols === sz.width && g.rows === sz.height) return focusMeasure(cv, g, 3);     // already half size
@@ -519,6 +544,8 @@
     const V = coverHalf ? coverHalf.data32F : null;           // only where the photo has pixels of its own
     const N = R.length, mx = new Float32Array(N);
     for (let k = 0; k < N; k++) mx[k] = V && V[k] < 0.5 ? 0 : Math.max(R[k], C[k]);
+    // glare (opts.tame) counts for nothing here: it is the light's reflection, not the subject
+    if (lookPastHalf) { const X = lookPastHalf.data32F; for (let k = 0; k < N; k++) mx[k] *= 1 - X[k]; }
     fr.delete(); fc.delete();
     const sorted = Float32Array.from(mx.filter((v, k) => k % 5 === 0 && v > 0)).sort();
     const top = sorted[Math.floor(sorted.length * 0.99)] || 1e-9;
@@ -1386,6 +1413,198 @@
     return b;
   }
 
+  /* ---------- shiny subjects (opts.tame) ----------
+     Glare is the light's own reflection in a wet or glossy surface. It moves with the light and
+     the viewpoint, so from photo to photo it comes and goes and changes shape; out of focus it
+     swells into bright discs whose edges look sharp; and a light held by hand (or a refocus a
+     few seconds later) lights each photo a little differently. The engine then reads glare and
+     lighting as the subject moving and leaves out the photos that disagree, which can be the
+     only ones sharp somewhere; or it keeps whichever glare looks sharpest. With opts.tame each
+     photo is relit to the reference's lighting first (a smooth gain, measured away from glare),
+     the movement checks look past glare, and where one photo glares and another shows the
+     surface there, the merge prefers the surface. Glare that every photo has stays: nothing
+     is painted in. Worked out at about SHINE_SIDE px across (sizes below are for that). */
+  const SHINE_SIDE = 1100;
+  const GLARE_WHITE = 0.75;         // glare is near-white: all of R, G, B at least this...
+  const GLARE_LIFT = 0.15;          // ...and this much brighter than the surface around it (blur 12)
+  const GLARE_EXCESS = 0.05;        // its photo is this much brighter there (blur 4) than another photo
+  const GLARE_SHARP = 0.5;          // ...and that other photo is at least this sharp there, relative to it
+  const GLARE_YIELD = 0.9;          // a photo's weight where its glare can be replaced: x (1 - this)
+  const GLARE_SPOT = 600;           // the movement checks look past glare spots up to this many pixels (about a 28 px disc)
+  const GAIN_MAX = 1.35;            // relighting stays within 1/1.35 .. 1.35...
+  const GAIN_BLUR = 24;             // ...and is smooth (blur 24, about 50 px at 2212 px): lighting, not things. A finer or
+                                    // stronger gain can 'relight' a pale part of the subject that is out of place into
+                                    // the background behind it, and the movement check then passes it (seen in the app)
+  const RELIGHT_FROM = 0.06;        // a photo is relit only if its gain is this far from 1 on average (synthetic night scene: 2-5%, from focus alone)
+
+  /** Where a photo has the reference's shapes, whatever the brightness (half size, 0..1): the
+      local correlation of the two (lightly blurred, so a difference in focus counts for less).
+      Where neither has much to correlate (smooth background), 1. */
+  function shapeAgreement(cv, refH, curH) {
+    const sw = 6 * refH.cols / 1106, B = (m, s) => { const o = new cv.Mat(); cv.GaussianBlur(m, o, new cv.Size(0, 0), s, s, cv.BORDER_REFLECT); return o; };
+    const a = B(refH, 2), b = B(curH, 2), ab = new cv.Mat(), aa = new cv.Mat(), bb = new cv.Mat();
+    cv.multiply(a, b, ab); cv.multiply(a, a, aa); cv.multiply(b, b, bb);
+    const ma = B(a, sw), mb = B(b, sw), mab = B(ab, sw), maa = B(aa, sw), mbb = B(bb, sw);
+    [a, b, ab, aa, bb].forEach(m => m.delete());
+    const out = new cv.Mat(refH.rows, refH.cols, cv.CV_32F), O = out.data32F;
+    const MA = ma.data32F, MB = mb.data32F, MAB = mab.data32F, MAA = maa.data32F, MBB = mbb.data32F;
+    for (let k = 0; k < O.length; k++) {
+      const va = Math.max(0, MAA[k] - MA[k] * MA[k]), vb = Math.max(0, MBB[k] - MB[k] * MB[k]);
+      const c = (MAB[k] - MA[k] * MB[k]) / Math.sqrt(va * vb + 1e-8);
+      const shape = Math.min(1, Math.max(0, (c - SHAPE_FROM) / (SHAPE_FULL - SHAPE_FROM)));
+      const t = Math.min(1, Math.sqrt(Math.max(va, vb)) / SHAPE_TEX);   // how much there is to go by
+      O[k] = 1 - t + t * shape;
+    }
+    [ma, mb, mab, maa, mbb].forEach(m => m.delete());
+    return out;
+  }
+  const SHAPE_FROM = 0.2, SHAPE_FULL = 0.6, SHAPE_TEX = 0.03;
+  /** The parts of a 0/1 mask (aw x ah) no bigger than maxArea pixels each. */
+  function smallOnly(cv, u8, aw, ah, maxArea) {
+    const m = cv.matFromArray(ah, aw, cv.CV_8U, u8), lab = new cv.Mat(), st = new cv.Mat(), ce = new cv.Mat();
+    const nl = cv.connectedComponentsWithStats(m, lab, st, ce, 8, cv.CV_32S); m.delete(); ce.delete();
+    const keep = new Uint8Array(nl), S = st.data32S, cols = st.cols;
+    for (let l = 1; l < nl; l++) keep[l] = S[l * cols + cv.CC_STAT_AREA] <= maxArea ? 1 : 0;
+    st.delete();
+    const out = new Uint8Array(aw * ah), Lb = lab.data32S;
+    for (let q = 0; q < out.length; q++) out[q] = keep[Lb[q]];
+    lab.delete();
+    return out;
+  }
+  /** An analysis-size 8-bit map (0..255) as a float map (0..1) at half size. */
+  function shineHalf(cv, u8, aw, ah, hw, hh) {
+    const m = cv.matFromArray(ah, aw, cv.CV_8U, u8), f = new cv.Mat(); m.convertTo(f, cv.CV_32F, 1 / 255); m.delete();
+    const o = new cv.Mat(); cv.resize(f, o, new cv.Size(hw, hh), 0, 0, cv.INTER_LINEAR); f.delete();
+    return o;
+  }
+  /** A ghost map (half size) with the glare in it (ex, 0..1) replaced by the agreement around
+      it (left as it is where there is nothing around to go by). */
+  function lookPast(cv, g, ex) {
+    const s = 6 * g.cols / 1106, w = new cv.Mat(), gw = new cv.Mat();
+    const one = new cv.Mat(g.rows, g.cols, cv.CV_32F, new cv.Scalar(1));
+    cv.subtract(one, ex, w); one.delete();
+    cv.multiply(g, w, gw);
+    const nb = new cv.Mat(), db = new cv.Mat();
+    cv.GaussianBlur(gw, nb, new cv.Size(0, 0), s, s, cv.BORDER_REFLECT); cv.GaussianBlur(w, db, new cv.Size(0, 0), s, s, cv.BORDER_REFLECT);
+    const G = g.data32F, X = ex.data32F, NB = nb.data32F, DB = db.data32F;
+    for (let k = 0; k < G.length; k++) {
+      if (X[k] <= 0) continue;
+      const around = DB[k] > 0.05 ? NB[k] / DB[k] : G[k];   // nothing to go by nearby: as it was
+      G[k] = G[k] * (1 - X[k]) + around * X[k];
+    }
+    [w, gw, nb, db].forEach(m => m.delete());
+  }
+  /** Shiny subjects: each photo's glare, and each photo (but the reference) relit in place to
+      the reference's lighting. Returns, per photo, {aw, ah, E: where the checks look past
+      (glare in it or in the reference), D: its own glare that another photo can replace}
+      (8-bit, aw x ah), and a log line per relit photo. */
+  async function tameShine(cv, warped, ref, W, H, each) {
+    const n = warped.length, sa = Math.min(1, SHINE_SIDE / Math.max(W, H));
+    const aw = Math.max(16, Math.round(W * sa)), ah = Math.max(16, Math.round(H * sa)), N = aw * ah, k = Math.max(aw, ah) / 1106;
+    const sm = await each('shine', warped.map(img => ({ img, W, H, aw, ah })));
+    const fl = u8 => { const m = cv.matFromArray(ah, aw, cv.CV_8U, u8), f = new cv.Mat(); m.convertTo(f, cv.CV_32F, 1 / 255); m.delete(); return f; };
+    const blur = (m, s) => { const o = new cv.Mat(); cv.GaussianBlur(m, o, new cv.Size(0, 0), s, s, cv.BORDER_REFLECT); return o; };
+    const grow = (u8, r) => {
+      const m = cv.matFromArray(ah, aw, cv.CV_8U, u8), se = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * r + 1, 2 * r + 1));
+      cv.dilate(m, m, se); se.delete(); const out = Uint8Array.from(m.data); m.delete(); return out;
+    };
+    // glare candidates: near-white and well above the surface around it
+    const cand = sm.map(r => {
+      const L = fl(r.L), bg = blur(L, 12 * k), A = L.data32F, B = bg.data32F, c = new Uint8Array(N);
+      for (let q = 0; q < N; q++) c[q] = A[q] > GLARE_WHITE && A[q] > B[q] + GLARE_LIFT ? 1 : 0;
+      L.delete(); bg.delete();
+      return grow(c, Math.max(1, Math.round(k)));
+    });
+    // the movement checks look past glare only in spots up to about a defocused glint's size: a
+    // big bright patch one photo has and another hasn't (a pale part of the subject that moved,
+    // or a photo lined up badly there) must still count against it
+    const small = cand.map(c => smallOnly(cv, c, aw, ah, GLARE_SPOT * k * k));
+    // lighting: a smooth gain towards the reference, measured where neither photo glares; kept
+    // at a quarter of the analysis size (it is smooth), read between its points when used
+    const gw = Math.max(4, Math.ceil(aw / 4)), gh = Math.max(4, Math.ceil(ah / 4));
+    const Yr = fl(sm[ref].Y), gains = new Array(n).fill(null), logs = [], jobs = [];
+    for (let i = 0; i < n; i++) {
+      if (i === ref) continue;
+      const Yi = fl(sm[i].Y), w = new cv.Mat(ah, aw, cv.CV_32F), Wd = w.data32F, Cr = cand[ref], Ci = cand[i];
+      for (let q = 0; q < N; q++) Wd[q] = Cr[q] || Ci[q] ? 0 : 1;
+      const a = new cv.Mat(), b = new cv.Mat(); cv.multiply(Yr, w, a); cv.multiply(Yi, w, b); Yi.delete();
+      const s = GAIN_BLUR * k, ab = blur(a, s), bb = blur(b, s), wb = blur(w, s); a.delete(); b.delete(); w.delete();
+      const A = ab.data32F, B = bb.data32F, Wb = wb.data32F;
+      let dev = 0;
+      for (let q = 0; q < N; q++) {
+        const d = Wb[q] + 1e-6;
+        const g = Wb[q] < 0.02 ? 1 : Math.min(GAIN_MAX, Math.max(1 / GAIN_MAX, (A[q] / d + 0.02) / (B[q] / d + 0.02)));
+        A[q] = g; dev += Math.abs(g - 1);
+      }
+      bb.delete(); wb.delete(); dev /= N;
+      // small differences are mostly focus (a blurred edge spreads its light), not lighting
+      if (dev > RELIGHT_FROM) {
+        const small = new cv.Mat(); cv.resize(ab, small, new cv.Size(gw, gh), 0, 0, cv.INTER_AREA);
+        gains[i] = Float32Array.from(small.data32F); small.delete();
+        logs.push(`photo ${i + 1}: lit differently; relit to match (by ${Math.round(dev * 100)}% on average)`);
+        jobs.push({ img: warped[i], W, H, aw: gw, ah: gh, gain: gains[i] });
+      }                                                     // else close enough: left as it is
+      ab.delete();
+    }
+    Yr.delete();
+    if (jobs.length) await each('relight', jobs);
+    // a photo's glare that another photo can replace: there, it is clearly brighter (blurred, so
+    // a difference in focus alone doesn't count) than at least one other photo. Each photo's
+    // blurred whiteness is made twice (lowest two first, then the comparison) rather than kept.
+    const blurredL = i => {
+      const L = fl(sm[i].L);
+      if (gains[i]) {
+        const g = cv.matFromArray(gh, gw, cv.CV_32F, gains[i]), G = new cv.Mat(); cv.resize(g, G, new cv.Size(aw, ah), 0, 0, cv.INTER_LINEAR); g.delete();
+        cv.multiply(L, G, L); G.delete();
+      }
+      const b = blur(L, 4 * k); L.delete(); return b;
+    };
+    // ...and only where that other photo is about as sharp as this one (going by the surface
+    // round the glare): a sharp catchlight beside its own blurred copies is the sharp one, and
+    // keeps its place; the blurred copies' spread light, and glare one photo has where another
+    // shows the surface as sharply, give way
+    const surfaceSharp = i => {
+      const Y = fl(sm[i].Y), b = new cv.Mat(); cv.GaussianBlur(Y, b, new cv.Size(0, 0), 0.8, 0.8); Y.delete();
+      const l = new cv.Mat(); cv.Laplacian(b, l, cv.CV_32F, 3); b.delete(); cv.multiply(l, l, l);
+      const w = new cv.Mat(ah, aw, cv.CV_32F), Wd = w.data32F, C = cand[i];
+      for (let q = 0; q < N; q++) Wd[q] = C[q] ? 0 : 1;
+      cv.multiply(l, w, l);
+      const nb = blur(l, 3 * k), db = blur(w, 3 * k); l.delete(); w.delete();
+      const NB = nb.data32F, DB = db.data32F;
+      for (let q = 0; q < N; q++) NB[q] /= DB[q] + 1e-6;
+      db.delete(); return nb;
+    };
+    const lo1 = new Float32Array(N).fill(Infinity), lo2 = new Float32Array(N).fill(Infinity), arg = new Uint8Array(N);
+    const f1 = new Float32Array(N), f2 = new Float32Array(N);
+    for (let i = 0; i < n; i++) {
+      const b = blurredL(i), Mi = b.data32F, fs = surfaceSharp(i), Fi = fs.data32F;
+      for (let q = 0; q < N; q++) {
+        const v = Mi[q];
+        if (v < lo1[q]) { lo2[q] = lo1[q]; f2[q] = f1[q]; lo1[q] = v; f1[q] = Fi[q]; arg[q] = i; } else if (v < lo2[q]) { lo2[q] = v; f2[q] = Fi[q]; }
+      }
+      b.delete(); fs.delete();
+    }
+    const E = [], D = [];
+    for (let i = 0; i < n; i++) {
+      const b = blurredL(i), Mi = b.data32F, fs = surfaceSharp(i), Fi = fs.data32F, Ci = cand[i], d = new Uint8Array(N), e = new Uint8Array(N);
+      for (let q = 0; q < N; q++) {
+        e[q] = small[i][q] || small[ref][q] ? 255 : 0;
+        const mine = arg[q] === i, other = mine ? lo2[q] : lo1[q], otherF = mine ? f2[q] : f1[q];
+        d[q] = Ci[q] && Mi[q] - other > GLARE_EXCESS && otherF >= GLARE_SHARP * Fi[q] ? 255 : 0;
+      }
+      fs.delete();
+      b.delete();
+      // a little wider (glare has soft edges), softened
+      const dm = cv.matFromArray(ah, aw, cv.CV_8U, grow(d, Math.max(1, Math.round(2 * k)))), df = new cv.Mat();
+      cv.GaussianBlur(dm, df, new cv.Size(0, 0), k, k, cv.BORDER_REFLECT); dm.delete();
+      D.push(Uint8Array.from(df.data)); df.delete();
+      E.push(e);
+    }
+    sm.length = 0;
+    const share = D.map(d => { let s = 0; for (let q = 0; q < N; q++) s += d[q]; return s / (255 * N); });
+    return { aw, ah, E, D, logs, share };
+  }
+
   function guidedFilter(cv, I, p, r, eps) {
     const k = new cv.Size(2 * r + 1, 2 * r + 1);
     const box = m => { const o = new cv.Mat(); cv.boxFilter(m, o, -1, k); return o; };
@@ -1739,13 +1958,55 @@
         }
         const r = eccRefine(cv, gray(cur), gray(ref), Hm, mask, pairs, repeating, h.rough, big, pre);
         if (h.rough && r.ok) logs.push(`photo ${cur + 1}: framed well apart from the others; lined up by its overall shape first`);
-        Hs.set(cur, r.H); done.push([cur, r.H, best, r.ok || !!r.skipped]);
+        Hs.set(cur, r.H); done.push([cur, r.H, best, r.ok || !!r.skipped, !!h.rough]);
         logs.push(`photo ${cur + 1}: ${best} matches${r.skipped ? '' : `, fine-tune ${r.ok ? 'ok' : 'skipped'}`}`);
         prev = cur; pos += dir;
         report(++k / Math.max(1, steps));
       }
       mask.delete(); grays.forEach(g => g.delete()); feats.forEach(f => f.d.delete());
       return { done, logs };
+    },
+    /** one lined-up photo's whiteness (the lowest of R, G, B) and grey, shrunk to aw x ah (8-bit),
+        for the glare and lighting checks (opts.tame); read a band of rows at a time */
+    shine(cv, a) {
+      const { W, H, aw, ah } = a, N = aw * ah, sL = new Float32Array(N), sY = new Float32Array(N), cnt = new Float32Array(N);
+      const ox = new Int32Array(W); for (let x = 0; x < W; x++) ox[x] = Math.min(aw - 1, Math.floor(x * aw / W));
+      for (let y0 = 0; y0 < H; y0 += BAND) {
+        const y1 = Math.min(H, y0 + BAND), D = STORE.get(a.img.h, y0 * W * 3, (y1 - y0) * W * 3);
+        for (let y = y0; y < y1; y++) {
+          const oy = Math.min(ah - 1, Math.floor(y * ah / H)) * aw;
+          for (let x = 0, p = (y - y0) * W * 3; x < W; x++, p += 3) {
+            const r = D[p], g = D[p + 1], b = D[p + 2], q = oy + ox[x];
+            sL[q] += r < g ? (r < b ? r : b) : (g < b ? g : b); sY[q] += 0.299 * r + 0.587 * g + 0.114 * b; cnt[q]++;
+          }
+        }
+      }
+      const L = new Uint8Array(N), Y = new Uint8Array(N);
+      for (let q = 0; q < N; q++) { const c = cnt[q] || 1; L[q] = Math.round(sL[q] / c); Y[q] = Math.round(sY[q] / c); }
+      return { L, Y };
+    },
+    /** a lined-up photo relit in place: each pixel times a.gain (aw x ah, smooth), read
+        between its points; a band of rows at a time */
+    relight(cv, a) {
+      const { W, H, aw, ah, gain } = a;
+      const x0 = new Int32Array(W), x1 = new Int32Array(W), fx = new Float32Array(W);
+      for (let x = 0; x < W; x++) { const u = Math.min(aw - 1, Math.max(0, (x + 0.5) * aw / W - 0.5)); x0[x] = Math.floor(u); x1[x] = Math.min(aw - 1, x0[x] + 1); fx[x] = u - x0[x]; }
+      for (let y0 = 0; y0 < H; y0 += BAND) {
+        const y1 = Math.min(H, y0 + BAND), D = STORE.get(a.img.h, y0 * W * 3, (y1 - y0) * W * 3);
+        for (let y = y0; y < y1; y++) {
+          const v = Math.min(ah - 1, Math.max(0, (y + 0.5) * ah / H - 0.5)), r0 = Math.floor(v), r1 = Math.min(ah - 1, r0 + 1), fy = v - r0;
+          const A = r0 * aw, B = r1 * aw;
+          for (let x = 0, p = (y - y0) * W * 3; x < W; x++, p += 3) {
+            const t = gain[A + x0[x]] + (gain[A + x1[x]] - gain[A + x0[x]]) * fx[x];
+            const u = gain[B + x0[x]] + (gain[B + x1[x]] - gain[B + x0[x]]) * fx[x];
+            const gg = t + (u - t) * fy;
+            const r = D[p] * gg + 0.5, g = D[p + 1] * gg + 0.5, b = D[p + 2] * gg + 0.5;
+            D[p] = r > 255 ? 255 : r; D[p + 1] = g > 255 ? 255 : g; D[p + 2] = b > 255 ? 255 : b;
+          }
+        }
+        STORE.set(a.img.h, y0 * W * 3, D);
+      }
+      return null;
     },
     /** a photo warped onto the reference, a band of rows at a time, into a.img (and its mask into a.msk) */
     warp(cv, a) {
@@ -1818,10 +2079,22 @@
       mT.delete(); bT.delete(); thumb.delete();
       const curH = halfOf(cv, gF, hw, hh); gF.delete();
       const g = ghostHalf(cv, rc.blurHalf, curH), cover = coverMap(cv, wmi, hw, hh); wmi.delete();
-      if (a.judge) { res.m = maskedMean(g.data32F, cover.data32F); res.sm = subjectAgreement(cv, rc.half, curH, g, cover); }
-      curH.delete();
+      // shiny subjects (opts.tame): glare in this photo or the reference says nothing about
+      // movement (the checks look past it), and this photo's own glare gives way where
+      // another photo shows the surface underneath
+      const ex = a.shine ? shineHalf(cv, a.shine.E, a.shine.aw, a.shine.ah, hw, hh) : null;
+      const pen = a.shine ? shineHalf(cv, a.shine.D, a.shine.aw, a.shine.ah, hw, hh) : null;
+      if (ex) lookPast(cv, g, ex);
+      if (a.judge) { res.m = maskedMean(g.data32F, cover.data32F); res.sm = subjectAgreement(cv, rc.half, curH, g, cover, ex); }
+      const curH2 = a.shine && a.judge ? curH.clone() : null;
+      curH.delete(); if (ex) ex.delete();
       const tm = unpark(cv, a.trust), U = g.data32F, C = cover.data32F, T = tm.data;
       for (let q = 0; q < U.length; q++) U[q] *= C[q] * T[q] / 255;
+      if (pen) { const P = pen.data32F; for (let q = 0; q < U.length; q++) U[q] *= 1 - GLARE_YIELD * P[q]; pen.delete(); }
+      // ...and, since relighting can make a misplaced pale part look like the background it
+      // covers, the photo must also have the reference's shapes there (brightness aside)
+      if (a.shine && a.judge) { const sa = shapeAgreement(cv, rc.half, curH2), S = sa.data32F; for (let q = 0; q < U.length; q++) U[q] *= S[q]; sa.delete(); }
+      if (curH2) curH2.delete();
       tm.delete(); cover.delete();
       const u8 = new cv.Mat(); g.convertTo(u8, cv.CV_8U, 255); g.delete();
       res.usable = new Uint8Array(u8.data);

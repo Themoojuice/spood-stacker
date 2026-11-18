@@ -161,6 +161,7 @@ body.rt-open { overflow: hidden; }
       <span class="count" id="count"></span>
     </div>
     <label class="opt"><input type="checkbox" id="hi" checked> Full detail: as sharp as the photos allow (slower; untick for a quicker, smaller stack)</label>
+    <label class="opt"><input type="checkbox" id="tame"> Wet or shiny subject: work around glare and light that changed between photos (keeps photos the stacker would otherwise leave out)</label>
   </section>
 
   <section id="work" class="panel working" hidden aria-live="polite">
@@ -193,6 +194,7 @@ body.rt-open { overflow: hidden; }
       <button class="ghost" id="share" hidden>Share…</button>
       <button class="ghost" id="again">Stack more</button>
     </div>
+    <p class="meta" id="tameBox" hidden>Glare blobs, or photos left out after the light changed? <button class="linkbtn" id="tameAgain" type="button">Stack again for a wet or shiny subject</button></p>
   </section>
 
   <p class="engine" id="engine">Stacking engine: loading…</p>
@@ -235,7 +237,7 @@ body.rt-open { overflow: hidden; }
 (() => {
   const $ = id => document.getElementById(id);
   const S = { pick: $('pick'), chosen: $('chosen'), work: $('work'), done: $('done') };
-  let files = [], busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
+  let files = [], lastTame = false, busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
   // basePixels: the stack (with any retouching) before the final sharpening; autoBase: the
   // automatic stack, the retouch editor's "Stack" source
   let rtFrames = [], basePixels = null, autoBase = null, refPhoto = 0;
@@ -406,7 +408,8 @@ body.rt-open { overflow: hidden; }
       for (const f of files) taken.push(await takenOf(f));
       try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) { /* private mode */ }
       if (cutShort) log(`fewer cores: ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen`);
-      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas) } });
+      lastTame = $('tame').checked;
+      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas), tame: lastTame } });
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -559,6 +562,8 @@ body.rt-open { overflow: hidden; }
     S.work.hidden = true; S.done.hidden = false;
     requestAnimationFrame(drawLoupe);
     $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
+    $('tameBox').hidden = !!lastTame;                      // offered only after a stack made without it
+    if (lastTame) $('resultInfo').textContent += ' · wet/shiny subject mode';
     save();
     done();
     scrollTo({ top: 0, behavior: 'smooth' });
@@ -639,8 +644,11 @@ body.rt-open { overflow: hidden; }
     rt.querySelector('[data-rt=cancel]').click();          // asks first if there is painting to lose
     if (!rt.hidden) history.pushState({ rt: true }, '');
   });
+  // the same photos once more, as a wet or shiny subject
+  $('tameAgain').addEventListener('click', () => { if (busy || files.length < 2) return; $('tame').checked = true; $('selection').hidden = true; delete $('selection').dataset.used; run(); });
   $('again').addEventListener('click', () => {
     files = []; rtFrames = []; basePixels = autoBase = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
+    $('tame').checked = false;                             // a new burst starts in the usual mode
     $('selection').hidden = true; delete $('selection').dataset.used;
   });
   addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });
