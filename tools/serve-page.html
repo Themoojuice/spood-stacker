@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spood Stacker: stack on this computer</title>
+<style>
+/* the page tools/serve.js shows: send a burst from the phone, get the stack back */
+:root { --bg: #eef1ec; --surface: #fff; --ink: #18201c; --muted: #5b675f; --line: #cfd7d0; --accent: #0b6e69; --warn: #9a4a06; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111614; --surface: #19201d; --ink: #e6ece8; --muted: #9aa8a0; --line: #2c3733; --accent: #4fc2b9; --warn: #f0a35e; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; padding: 18px 14px 40px; }
+main { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-size: 1.5rem; margin: 0; } h1 span { color: var(--accent); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.note { margin: 0; color: var(--muted); font-size: .92rem; }
+button, .btn { font: 700 1rem/1 system-ui, sans-serif; border-radius: 12px; padding: 14px 18px; border: 1px solid transparent; background: var(--accent); color: var(--surface); cursor: pointer; text-decoration: none; display: inline-block; }
+button:disabled { opacity: .45; }
+.bar { height: 12px; background: var(--line); border-radius: 99px; overflow: hidden; } .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+img { width: 100%; border-radius: 10px; }
+pre { font: 12px/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; margin: 0; max-height: 180px; overflow: auto; }
+label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: .95rem; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Spood <span>Stacker</span> · on this computer</h1>
+  <section class="panel" id="pick">
+    <input type="file" id="file" accept="image/*" multiple>
+    <label><input type="checkbox" id="tame"> Wet or shiny subject</label>
+    <button id="go" disabled>Send and stack</button>
+    <p class="note">The photos go to the computer running the server, which stacks them with the same engine as the phone app. You can leave this page once they're sent: come back to it (or refresh) for the result.</p>
+  </section>
+  <section class="panel" id="work" hidden>
+    <strong id="stage">Sending</strong>
+    <div class="bar"><i id="fill"></i></div>
+    <pre id="log"></pre>
+  </section>
+  <section class="panel" id="done" hidden>
+    <a id="open" target="_blank"><img id="img" alt="The stack"></a>
+    <p class="note" id="info"></p>
+    <a class="btn" id="dl" download>Save the JPEG</a>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let files = [];
+  $('file').addEventListener('change', () => { files = [...$('file').files]; $('go').disabled = files.length < 2; $('go').textContent = `Send and stack ${files.length} photos`; });
+  // capture time from the camera's file name (EXIF is read on the computer anyway)
+  async function go() {
+    $('pick').hidden = true; $('work').hidden = false;
+    files.sort((a, b) => (a.lastModified - b.lastModified) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const head = new TextEncoder().encode(JSON.stringify({ files: files.map(f => ({ name: f.name, size: f.size, taken: null })), opts: { tame: $('tame').checked } }));
+    const len = new Uint8Array(4); new DataView(len.buffer).setUint32(0, head.length);
+    const body = new Blob([len, head, ...files]);
+    // XHR for upload progress
+    const id = await new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest(); x.open('POST', 'stack');
+      x.upload.onprogress = e => { $('fill').style.width = (e.loaded / e.total * 100).toFixed(0) + '%'; $('stage').textContent = `Sending ${(e.loaded / 1048576).toFixed(0)} of ${(e.total / 1048576).toFixed(0)} MB`; };
+      x.onload = () => x.status === 200 ? resolve(JSON.parse(x.responseText).id) : reject(new Error(x.responseText));
+      x.onerror = () => reject(new Error('Could not reach the computer.')); x.send(body);
+    }).catch(e => { $('stage').textContent = e.message; return null; });
+    if (!id) return;
+    location.hash = id; watch(id);
+  }
+  async function watch(id) {
+    $('pick').hidden = true; $('work').hidden = false;
+    for (;;) {
+      let s; try { s = await (await fetch('jobs/' + id)).json(); } catch (e) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      if (s.error && !s.state) { $('stage').textContent = s.error; return; }
+      $('stage').textContent = `${s.stage} · ${Math.round(s.p * 100)}%`; $('fill').style.width = (s.p * 100) + '%'; $('log').textContent = s.log.join('\n');
+      if (s.state === 'done') {
+        $('work').hidden = true; $('done').hidden = false;
+        $('img').src = $('open').href = $('dl').href = 'jobs/' + id + '/stack.jpg';
+        $('info').textContent = `${s.result.width} × ${s.result.height} px in ${Math.round(s.result.secs)} s` + (s.result.selection && s.result.selection.left.length ? ` · left out: ${s.result.selection.left.map(l => 'photo ' + l.photo + ' (' + l.why + ')').join(', ')}` : '');
+        if (Notification && Notification.permission === 'granted') new Notification('Stack ready');
+        return;
+      }
+      if (s.state === 'failed') { $('stage').textContent = 'Stacking stopped: ' + s.error; return; }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  $('go').addEventListener('click', go);
+  if (location.hash.length > 1) watch(location.hash.slice(1));
+})();
+</script>
+</body>
+</html>
