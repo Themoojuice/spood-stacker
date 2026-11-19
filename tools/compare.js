@@ -6,7 +6,8 @@
    --a SPEC     baseline   (default: the gold version, from tests/gold.txt)
    --b SPEC     candidate  (default: engine.js as it is on disk now)
                 SPEC is a file path, git:<ref> (engine.js at that commit/tag/branch),
-                or py:<path to stacker.py> (the laptop version)
+                or py:<path to stacker.py> (the laptop version). A JS SPEC can end in
+                +option (several allowed) to switch engine options on, e.g. engine.js+tame
    --size N     working size, long side in pixels (default 3000, like the app)
    --crops N    close-up crops per burst (default 6)
    --out DIR    where the contact sheets go (default compare-out/<time>)
@@ -51,8 +52,18 @@ opt.b = opt.b || 'engine.js';
 const CACHE = path.join(L.ROOT, 'tests', '.cache');
 fs.mkdirSync(CACHE, { recursive: true });
 
-/** Turn a SPEC into something runnable: {label, kind, file, hash}. */
-function resolve(spec) {
+/** Turn a SPEC into something runnable: {label, kind, file, hash, opts}. */
+function resolve(full) {
+  // engine options switched on with +name suffixes (JS engines only)
+  const [spec, ...flags] = full.split('+');
+  const r = resolveFile(spec);
+  if (flags.length) {
+    r.opts = Object.fromEntries(flags.map(f => [f, true]));
+    r.label += ' +' + flags.join(' +'); r.hash += '-' + flags.join('-');
+  }
+  return r;
+}
+function resolveFile(spec) {
   if (spec.startsWith('git:')) {
     const ref = spec.slice(4);
     let src, sha;
@@ -94,7 +105,7 @@ function runEngine(eng, dir) {
   let r;
   if (eng.kind === 'js') {
     r = spawnSync(process.execPath, ['--max-old-space-size=6000', path.join(__dirname, 'run-engine.js'), eng.file, dir, String(opt.size), prefix],
-      { encoding: 'utf8', env: process.env });
+      { encoding: 'utf8', env: Object.assign({}, process.env, eng.opts ? { ENGINE_OPTS: JSON.stringify(eng.opts) } : {}) });
   } else {
     const py = process.platform === 'win32' ? 'python' : 'python3';
     r = spawnSync(py, [eng.file, dir, '-o', prefix + '.png', '--max-side', String(opt.size), '--no-exif'], { encoding: 'utf8' });

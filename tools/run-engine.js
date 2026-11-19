@@ -22,7 +22,9 @@ async function main() {
   for (const p of photos) frames.push(await decodeLikeApp(p, maxSide));
   let selection = null;
   const t0 = Date.now();
-  const out = await engine.stackFrames(cv, frames, { maxSide, onSelection: s => { selection = s; } });
+  // ENGINE_OPTS: extra engine options as JSON (compare.js sets it for a SPEC like engine.js+tame)
+  const extra = process.env.ENGINE_OPTS ? JSON.parse(process.env.ENGINE_OPTS) : {};
+  const out = await engine.stackFrames(cv, frames, Object.assign({ maxSide, onSelection: s => { selection = s; } }, extra));
   const secs = (Date.now() - t0) / 1000;
   await writeRGBA(outPrefix + '.png', out);
   const refLine = (out.log || []).find(l => /reference photo \d+/.test(l)) || '';
