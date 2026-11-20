@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b6e69">
+<title>Spood Stacker: background lab</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* A test bench for one question: what keeps a stack running while the app is off screen?
+   It loads the phone the way a big stack does (busy cores, gigabytes held), records a heartbeat
+   every second in storage that survives the page being closed, and shows afterwards whether the
+   work kept going, paused, or was killed while you were in another app. */
+:root { --bg: #eef1ec; --surface: #fff; --ink: #18201c; --muted: #5b675f; --line: #cfd7d0; --accent: #0b6e69; --warn: #b4235a; --amber: #9a4a06;
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif; --font-body: "Atkinson Hyperlegible", system-ui, sans-serif; --font-mono: "JetBrains Mono", ui-monospace, monospace; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111614; --surface: #19201d; --ink: #e6ece8; --muted: #9aa8a0; --line: #2c3733; --accent: #4fc2b9; --warn: #ff7aa2; --amber: #f0a35e; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 var(--font-body); padding: 18px 14px 40px; }
+main { max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+h1 { font: 700 1.6rem/1.1 var(--font-display); margin: 0; } h1 span { color: var(--accent); }
+h2 { font: 700 1.05rem/1.2 var(--font-display); margin: 0; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.note { margin: 0; color: var(--muted); font-size: .92rem; }
+label.opt { display: flex; gap: 10px; align-items: flex-start; font-size: .95rem; }
+label.opt input { width: 18px; height: 18px; margin-top: 3px; accent-color: var(--accent); flex: none; }
+label.opt small { display: block; color: var(--muted); }
+select { font: inherit; padding: 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+button { font: 700 1rem/1 var(--font-body); border-radius: 12px; padding: 14px 18px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--surface); border-color: transparent; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.big { font: 700 1.3rem/1.3 var(--font-display); }
+canvas { width: 100%; height: 150px; display: block; border-radius: 10px; background: var(--bg); }
+pre { font: 12px/1.45 var(--font-mono); color: var(--muted); white-space: pre-wrap; margin: 0; max-height: 220px; overflow: auto; }
+.verdict { font-weight: 700; }
+.ok { color: var(--accent); } .bad { color: var(--warn); } .meh { color: var(--amber); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Background <span>lab</span></h1>
+    <p class="note">Does a stack survive you switching apps? This loads the phone like a big stack does, then records what happens while you're away.</p>
+  </div>
+
+  <section class="panel" id="setup">
+    <h2>1. Set up</h2>
+    <label class="opt">Memory to hold
+      <select id="mem"><option value="0">none</option><option value="1024">1 GB</option><option value="2560" selected>2.5 GB (like a 26-photo full-detail stack)</option><option value="3072">3 GB (4 cores at once)</option></select></label>
+    <label class="opt">Busy cores <select id="cores"><option>1</option><option>2</option><option selected>5</option></select></label>
+    <p class="note">Keep-alive tricks to try (one at a time tells you most):</p>
+    <label class="opt"><input type="checkbox" id="kWake"><span>Screen lock<small>what the app does now: the screen stays on while the app is open</small></span></label>
+    <label class="opt"><input type="checkbox" id="kHum"><span>Near-silent hum + progress notification<small>brown noise 56 dB below full scale: Chrome counts it as sound, a phone speaker barely plays it</small></span></label>
+    <label class="opt"><input type="checkbox" id="kPip"><span>Picture-in-picture window<small>a small live window that floats over other apps</small></span></label>
+    <div class="row"><button class="primary" id="go">Start test</button><span class="note" id="startNote"></span></div>
+  </section>
+
+  <section class="panel" id="running" hidden>
+    <h2>2. Now leave</h2>
+    <p class="big" id="runState">Loading the phone…</p>
+    <p class="note">Switch to another app (the camera is a good test) or lock the screen for <strong>3 to 5 minutes</strong>, then come back here. If the phone closed this page while you were away, just open it again: the record is kept.</p>
+    <canvas id="chart"></canvas>
+    <div class="row"><button id="stop">Stop and show results</button></div>
+  </section>
+
+  <section class="panel" id="results" hidden>
+    <h2>3. What happened</h2>
+    <p class="verdict" id="verdict"></p>
+    <canvas id="chart2"></canvas>
+    <p class="note" id="legend">Bars: work done each 5 s. Shaded: the page was off screen.</p>
+    <pre id="report"></pre>
+    <div class="row"><button class="primary" id="copy">Copy results</button><button id="again">Test again</button></div>
+    <p class="note" id="copied"></p>
+  </section>
+
+  <section class="panel" id="history" hidden>
+    <h2>Earlier tests</h2>
+    <pre id="hist"></pre>
+  </section>
+</main>
+<script src="keepalive.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id), KEY = 'spood-lab-run', HIST = 'spood-lab-history';
+  const now = () => Date.now();
+  let run = null, workers = [], saveTimer = 0, wake = null, pipCanvas = null, pipTimer = 0;
+
+  // ---------- the load: busy workers holding memory, each reporting its work every second ----------
+  const workerSrc = `
+    let hold = [], work = 0, last = Date.now();
+    onmessage = e => {
+      const mb = e.data.mb;
+      try { for (let k = 0; k < mb / 64; k++) { const a = new Uint8Array(64 << 20); for (let i = 0; i < a.length; i += 4096) a[i] = 1; hold.push(a); } }
+      catch (err) { postMessage({ oom: true, held: hold.length * 64 }); }
+      postMessage({ held: hold.length * 64 });
+      // ~50 ms slices of floating-point work, a beat every second (with how much was done)
+      const spin = () => {
+        const t = Date.now(); let x = 0;
+        while (Date.now() - t < 50) { for (let i = 0; i < 2e4; i++) x += Math.sqrt(i * 1.0001 + x % 7); work++; }
+        if (Date.now() - last >= 1000) { postMessage({ beat: Date.now(), work }); work = 0; last = Date.now(); }
+        // keep touching what we hold, the way a stack reads its photos back
+        if (hold.length) { const a = hold[(Math.random() * hold.length) | 0]; a[(Math.random() * a.length) | 0]++; }
+        setTimeout(spin, 0);
+      };
+      spin();
+    };`;
+  const url = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
+
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(run)); } catch (e) { /* storage full? */ } }
+  function load() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } }
+  function mark(type) { if (!run) return; run.events.push([now() - run.t0, type]); save(); }
+
+  async function start() {
+    const opts = { memMB: +$('mem').value, cores: +$('cores').value, wake: $('kWake').checked, hum: $('kHum').checked, pip: $('kPip').checked };
+    run = { t0: now(), opts, beats: [], events: [], ua: navigator.userAgent, status: 'running', cpus: navigator.hardwareConcurrency, deviceMemory: navigator.deviceMemory || null };
+    save();
+    $('setup').hidden = true; $('results').hidden = true; $('running').hidden = false;
+    // keep-alive tricks (from this tap, so sound and picture-in-picture are allowed)
+    if (opts.hum) { const ok = await SpoodKeepAlive.start(); run.humOk = ok; mark(ok ? 'hum on' : 'hum refused'); }
+    if (opts.wake) { try { wake = await navigator.wakeLock.request('screen'); mark('screen lock on'); } catch (e) { mark('screen lock refused'); } }
+    if (opts.pip) {
+      pipCanvas = document.createElement('canvas'); pipCanvas.width = 320; pipCanvas.height = 180; drawPip();
+      const ok = await SpoodKeepAlive.popOut(pipCanvas, drawPip); run.pipOk = ok; mark(ok ? 'picture-in-picture on' : 'picture-in-picture refused');
+      pipTimer = setInterval(drawPip, 250);
+    }
+    const per = Math.floor(opts.memMB / opts.cores);
+    for (let k = 0; k < opts.cores; k++) {
+      const w = new Worker(url); workers.push(w);
+      w.onmessage = e => {
+        const d = e.data;
+        if (d.oom) mark(`worker ${k}: could only hold ${d.held} MB`);
+        if (d.held !== undefined && !d.oom) mark(`worker ${k}: holding ${d.held} MB`);
+        if (d.beat) { run.beats.push([d.beat - run.t0, k, d.work]); }
+      };
+      w.postMessage({ mb: per });
+    }
+    clearInterval(saveTimer); saveTimer = setInterval(() => { save(); drawLive(); }, 1000);
+    $('runState').textContent = 'Running. Leave the app now.';
+  }
+
+  function stop(status = 'stopped') {
+    if (!run) return;
+    run.status = status; run.t1 = now(); mark('stopped');
+    workers.forEach(w => w.terminate()); workers = [];
+    clearInterval(saveTimer); clearInterval(pipTimer);
+    try { wake && wake.release(); } catch (e) {}
+    SpoodKeepAlive.stop();
+    save(); show(run);
+  }
+
+  function drawPip() {
+    if (!pipCanvas) return;
+    const g = pipCanvas.getContext('2d'), s = run ? Math.round((now() - run.t0) / 1000) : 0;
+    g.fillStyle = '#0b1110'; g.fillRect(0, 0, 320, 180);
+    g.fillStyle = '#4fc2b9'; g.font = '700 22px system-ui'; g.fillText('Background lab', 16, 40);
+    g.fillStyle = '#e6ece8'; g.font = '16px monospace'; g.fillText(`running ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`, 16, 80);
+    const last = run && run.beats.length ? run.beats[run.beats.length - 1][0] : 0;
+    g.fillText(`last beat ${((now() - run.t0 - last) / 1000).toFixed(0)} s ago`, 16, 110);
+    g.fillStyle = '#ffb35c'; g.fillRect(16, 140, (s * 7) % 288, 8);
+  }
+
+  // ---------- what happened ----------
+  function bins(r, end) {
+    const B = 5000, n = Math.max(1, Math.ceil(end / B)), work = new Float64Array(n), away = new Uint8Array(n);
+    for (const [t, , w] of r.beats) { const k = Math.floor(t / B); if (k < n) work[k] += w; }
+    // off-screen spans from the visibility events
+    let hiddenSince = null;
+    const spans = [];
+    for (const [t, ev] of r.events) { if (ev === 'hidden' && hiddenSince === null) hiddenSince = t; if (ev === 'visible' && hiddenSince !== null) { spans.push([hiddenSince, t]); hiddenSince = null; } }
+    if (hiddenSince !== null) spans.push([hiddenSince, end]);
+    for (const [a, b] of spans) for (let k = Math.floor(a / B); k <= Math.min(n - 1, Math.floor(b / B)); k++) away[k] = 1;
+    return { B, n, work, away, spans };
+  }
+  function chart(canvas, r, end) {
+    const { n, work, away } = bins(r, end), dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr; const g = canvas.getContext('2d'); g.scale(dpr, dpr);
+    const cs = getComputedStyle(document.body), max = Math.max(1, ...work), bw = w / n;
+    for (let k = 0; k < n; k++) {
+      if (away[k]) { g.fillStyle = 'rgba(180,35,90,.12)'; g.fillRect(k * bw, 0, Math.ceil(bw), h); }
+      g.fillStyle = cs.getPropertyValue('--accent'); const bh = work[k] / max * (h - 18); g.fillRect(k * bw + 0.5, h - 14 - bh, Math.max(1, bw - 1), bh);
+    }
+    g.fillStyle = cs.getPropertyValue('--muted'); g.font = '10px monospace';
+    for (let s = 0; s <= end / 1000; s += 60) g.fillText(`${s / 60}m`, s * 1000 / end * w + 2, h - 2);
+  }
+  function drawLive() { if (run && !$('running').hidden) chart($('chart'), run, now() - run.t0); }
+
+  function summarise(r) {
+    const end = (r.t1 || r.lastSeen || now()) - r.t0, { B, work, away, spans } = bins(r, end);
+    let onSum = 0, onN = 0, offSum = 0, offN = 0;
+    for (let k = 1; k < work.length - 1; k++) { if (away[k]) { offSum += work[k]; offN++; } else { onSum += work[k]; onN++; } }
+    const onRate = onN ? onSum / onN : 0, offRate = offN ? offSum / offN : 0;
+    const awayMs = spans.reduce((a, [x, y]) => a + (y - x), 0);
+    // the longest silence (no heartbeat from any worker) while away
+    const ts = [...new Set(r.beats.map(b => Math.floor(b[0] / 1000)))].sort((a, b) => a - b);
+    let gap = 0, gapAt = 0; for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > gap) { gap = ts[i] - ts[i - 1]; gapAt = ts[i - 1]; }
+    const lastBeat = r.beats.length ? r.beats[r.beats.length - 1][0] : 0;
+    const killed = r.status === 'killed';
+    const tricks = [r.opts.wake && 'screen lock', r.opts.hum && `hum${r.humOk === false ? ' (refused)' : ''}`, r.opts.pip && `picture-in-picture${r.pipOk === false ? ' (refused)' : ''}`].filter(Boolean).join(' + ') || 'no keep-alive';
+    let verdict, cls;
+    if (killed) {
+      verdict = spans.length ? `The phone closed the page ${fmt(Math.max(0, lastBeat - spans[0][0]))} after it went off screen.`
+        : `The page was closed ${fmt(lastBeat)} into the test without having gone off screen (reloaded, or closed from the app switcher?).`;
+      cls = 'bad';
+    }
+    else if (!awayMs) { verdict = 'The page never went off screen, so this run says nothing yet. Start again and switch apps for a few minutes.'; cls = 'meh'; }
+    else if (offRate >= 0.8 * onRate) { verdict = `Work carried on off screen at ${Math.round(100 * offRate / (onRate || 1))}% of on-screen speed for ${fmt(awayMs)}.`; cls = 'ok'; }
+    else if (offRate > 0.05 * onRate) { verdict = `Work slowed off screen to ${Math.round(100 * offRate / (onRate || 1))}% of on-screen speed (${fmt(awayMs)} away).`; cls = 'meh'; }
+    else { verdict = `Work stopped off screen (longest pause ${gap} s, from ${fmt(gapAt * 1000)}) and picked up again when you came back.`; cls = 'bad'; }
+    const lines = [
+      `trick: ${tricks}`, `memory held: ${r.opts.memMB} MB on ${r.opts.cores} busy cores (phone reports ${r.cpus} cores, ${r.deviceMemory || '?'} GB)`,
+      `away: ${fmt(awayMs)} in ${spans.length} spell(s)`, `work rate on screen ${onRate.toFixed(0)}, off screen ${offRate.toFixed(0)} per ${B / 1000} s`,
+      `longest silence: ${gap} s`, `result: ${verdict}`, '', 'events:', ...r.events.map(([t, e]) => `  ${fmt(t)}  ${e}`), '', r.ua
+    ];
+    return { verdict, cls, text: lines.join('\n'), end };
+  }
+  function fmt(ms) { const s = Math.round(ms / 1000); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; }
+
+  function show(r) {
+    $('running').hidden = true; $('setup').hidden = true; $('results').hidden = false;
+    const s = summarise(r);
+    $('verdict').textContent = s.verdict; $('verdict').className = 'verdict ' + s.cls; $('report').textContent = s.text;
+    chart($('chart2'), r, s.end);
+    try { const h = JSON.parse(localStorage.getItem(HIST) || '[]'); if (!h.some(x => x.t0 === r.t0)) { h.unshift({ t0: r.t0, line: `${new Date(r.t0).toLocaleString('en-AU')}: ${s.text.split('\n')[0]} → ${s.verdict}` }); localStorage.setItem(HIST, JSON.stringify(h.slice(0, 12))); } showHist(); } catch (e) {}
+  }
+  function showHist() { try { const h = JSON.parse(localStorage.getItem(HIST) || '[]'); $('history').hidden = !h.length; $('hist').textContent = h.map(x => x.line).join('\n'); } catch (e) {} }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!run || run.status !== 'running') return;
+    mark(document.hidden ? 'hidden' : 'visible');
+    if (!document.hidden) { $('runState').textContent = 'Welcome back. Still running: tap Stop to see the results, or leave again.'; drawLive(); }
+  });
+  document.addEventListener('freeze', () => mark('frozen'));
+  document.addEventListener('resume', () => mark('resumed'));
+  addEventListener('pagehide', () => { if (run && run.status === 'running') { run.lastSeen = now(); mark('pagehide'); } });
+
+  $('go').addEventListener('click', start);
+  $('stop').addEventListener('click', () => stop('stopped'));
+  $('again').addEventListener('click', () => { run = null; try { localStorage.removeItem(KEY); } catch (e) {} $('results').hidden = true; $('setup').hidden = false; });
+  $('copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('report').textContent); $('copied').textContent = 'Copied. Paste it to Claude.'; } catch (e) { $('copied').textContent = 'Could not copy; select the text above instead.'; } });
+
+  // a run that was still "running" when this page loaded: the phone closed the page mid-test
+  const prev = load();
+  if (prev && prev.status === 'running') {
+    prev.status = 'killed'; prev.t1 = Math.max(prev.beats.length ? prev.beats[prev.beats.length - 1][0] + prev.t0 : prev.t0, prev.lastSeen || 0);
+    prev.events.push([prev.t1 - prev.t0, 'page was closed by the phone (found on reopening)']);
+    try { localStorage.setItem(KEY, JSON.stringify(prev)); } catch (e) {}
+    show(prev);
+  } else if (prev && prev.status === 'stopped') show(prev);
+  showHist();
+})();
+</script>
+</body>
+</html>

@@ -199,6 +199,8 @@ self.onmessage = async ev => {
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),
       onSelection: sel => postMessage({ type: 'selection', sel }),
+      // "watch the maths": small previews of each stage for the page's animation
+      onPeek: opts.peek ? (name, d) => postMessage({ type: 'peek', name, d }) : undefined,
       // lined-up photos for the retouch brush, sent as JPEGs to keep the page's memory down
       onFrame: opts.retouch && typeof OffscreenCanvas !== 'undefined' ? async f => {
         const frame = f.blob ? f : await encodeFrame(f);              // a helper may have encoded it already

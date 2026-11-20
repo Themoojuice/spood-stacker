@@ -88,6 +88,15 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
 #coresNote { margin-top: 6px; }
 .linkbtn { font: inherit; color: var(--accent); background: none; border: 0; padding: 4px 0; text-decoration: underline; display: inline; border-radius: 0; }
 @media (prefers-reduced-motion: reduce) { .eyes i { animation: none; } .bar > i { transition: none; } }
+/* watch the maths: the engine's own working data, animated while it stacks (maths.js) */
+.maths { width: 100%; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.maths canvas { width: 100%; aspect-ratio: 4 / 3.5; border-radius: 12px; background: #0b1110; display: block; }
+.maths-title { font: 700 1.05rem/1.25 var(--font-display); }
+.maths-eq { font: italic 1rem/1.45 "STIX Two Text", "Cambria Math", "Noto Serif", Georgia, serif; color: var(--accent); overflow-wrap: anywhere; }
+.maths-eq sub, .maths-eq sup { font-size: .7em; }
+.maths-cap { margin: 0; color: var(--muted); font-size: .9rem; }
+.maths-live { margin: 0; font: 12px/1.45 var(--font-mono); color: var(--warn); min-height: 1.45em; }
+.work-links { justify-content: center; font-size: .9rem; }
 .meta { margin: 0; font-size: .9rem; color: var(--muted); }
 .meta.warn { color: var(--warn); }
 .sharp { display: flex; flex-direction: column; gap: 6px; }
@@ -161,15 +170,28 @@ body.rt-open { overflow: hidden; }
       <span class="count" id="count"></span>
     </div>
     <label class="opt"><input type="checkbox" id="hi" checked> Full detail: as sharp as the photos allow (slower; untick for a quicker, smaller stack)</label>
+    <label class="opt"><input type="checkbox" id="bgKeep"> Keep stacking if I switch apps (experimental: plays a near-silent hum and shows progress in your notifications)</label>
     <label class="opt"><input type="checkbox" id="tame"> Wet or shiny subject: work around glare and light that changed between photos (keeps photos the stacker would otherwise leave out)</label>
   </section>
 
   <section id="work" class="panel working" hidden aria-live="polite">
-    <div class="eyes" aria-hidden="true"><i></i><i></i></div>
+    <div class="eyes" id="eyes" aria-hidden="true"><i></i><i></i></div>
+    <div class="maths" id="maths" hidden>
+      <canvas id="mathsCanvas" aria-hidden="true"></canvas>
+      <div class="maths-title" id="mTitle"></div>
+      <div class="maths-eq" id="mEq"></div>
+      <p class="maths-cap" id="mCap"></p>
+      <p class="maths-live" id="mLive"></p>
+    </div>
     <div class="stage" id="stage">Starting</div>
     <div class="bar" role="progressbar" aria-labelledby="stage" aria-valuemin="0" aria-valuemax="100" id="bar"><i id="fill"></i></div>
     <div class="pct" id="pct">0%</div>
     <p class="note" id="eta">Keep this screen open. Nothing leaves your phone.</p>
+    <div class="row work-links">
+      <button class="linkbtn" id="mathsToggle" type="button">Hide the maths</button>
+      <button class="linkbtn" id="popOut" type="button" hidden>Pop out</button>
+      <button class="linkbtn" id="bgNow" type="button" hidden>Keep going if I switch apps</button>
+    </div>
     <details><summary>Details</summary><pre class="log" id="log"></pre></details>
   </section>
 
@@ -232,6 +254,8 @@ body.rt-open { overflow: hidden; }
 <script src="exif.js"></script>
 <script src="sharpen.js"></script>
 <script src="retouch.js"></script>
+<script src="maths.js"></script>
+<script src="keepalive.js"></script>
 
 <script>
 (() => {
@@ -262,6 +286,7 @@ body.rt-open { overflow: hidden; }
       else if (d.type === 'plan') gotPlan(d.plan);
       else if (d.type === 'progress') setProgress(d.p, d.s);
       else if (d.type === 'log') log(d.m);
+      else if (d.type === 'peek') { if (maths) maths.peek(d.name, d.d); }
       else if (d.type === 'selection') showSelection(d.sel);
       else if (d.type === 'frame') rtFrames.push(d.frame);
       else if (d.type === 'done') finish(d.out);
@@ -327,6 +352,8 @@ body.rt-open { overflow: hidden; }
     const pct = Math.round(p * 100);
     $('fill').style.width = pct + '%'; $('pct').textContent = pct + '%'; $('bar').setAttribute('aria-valuenow', pct);
     if (s) $('stage').textContent = s;
+    if (maths) maths.progress(p, s);
+    if (self.SpoodKeepAlive && SpoodKeepAlive.playing) SpoodKeepAlive.update(`Stacking ${files.length} photos · ${pct}%`, ($('stage').textContent || '') + ' · ' + ($('eta').textContent || '').replace(/ Keep this screen open\./, ''), mathsOn ? $('mathsCanvas') : null);
     if (p > 0.15 && p < 1) {
       const el = (performance.now() - t0) / 1000, left = Math.max(0, el / p - el);
       // to the nearest 5 s under a minute, then to the nearest half minute
@@ -334,7 +361,31 @@ body.rt-open { overflow: hidden; }
       $('eta').textContent = `About ${left < 60 ? Math.max(5, Math.round(left / 5) * 5) + ' seconds' : mins + ' min'} left. Keep this screen open.`;
     }
   }
-  function log(m) { $('log').textContent += m + '\n'; }
+  function log(m) { $('log').textContent += m + '\n'; if (maths) maths.log(m); }
+
+  // ---------- watch the maths (maths.js): the engine's own data, animated while it works ----------
+  let maths = null, mathsOn = true;
+  try { mathsOn = localStorage.getItem('spood-maths') !== '0'; } catch (e) { /* private mode */ }
+  if (self.SpoodMaths) maths = SpoodMaths.create($('mathsCanvas'), { title: $('mTitle'), eq: $('mEq'), cap: $('mCap'), live: $('mLive') });
+  function showMaths() {
+    const on = !!maths && mathsOn;
+    $('maths').hidden = !on; $('eyes').hidden = on;
+    $('mathsToggle').textContent = on ? 'Hide the maths' : 'Watch the maths';
+    $('popOut').hidden = !(on && busy && self.SpoodKeepAlive && SpoodKeepAlive.canPopOut());
+    if (maths) { if (on && busy && !document.hidden) maths.start(); else maths.stop(); }
+  }
+  $('mathsToggle').addEventListener('click', () => { mathsOn = !mathsOn; try { localStorage.setItem('spood-maths', mathsOn ? '1' : '0'); } catch (e) {} showMaths(); });
+  // picture in picture: the maths view in a small window over other apps
+  $('popOut').addEventListener('click', async () => { if (!(await SpoodKeepAlive.popOut($('mathsCanvas'), () => maths && maths.frame()))) log('picture-in-picture is not available here'); });
+  // keep going off screen (keepalive.js): from the option, or this button when the stack started by itself
+  try { $('bgKeep').checked = localStorage.getItem('spood-bg') === '1'; } catch (e) { /* private mode */ }
+  $('bgKeep').addEventListener('change', () => { try { localStorage.setItem('spood-bg', $('bgKeep').checked ? '1' : '0'); } catch (e) {} });
+  async function keepGoing() {
+    const ok = self.SpoodKeepAlive && await SpoodKeepAlive.start();
+    log(ok ? 'keeping going off screen: near-silent hum on, progress in the notification' : 'could not start the background hum (tap "Keep going if I switch apps")');
+    $('bgNow').hidden = !!ok || !busy;
+  }
+  $('bgNow').addEventListener('click', keepGoing);
 
   // capture time: EXIF first, then the camera's file name; lets the engine spot a
   // photo from a different moment (a second burst, the subject having walked)
@@ -369,8 +420,11 @@ body.rt-open { overflow: hidden; }
   // closing the app or leaving the page on purpose doesn't count as cut short
   addEventListener('pagehide', () => { try { localStorage.removeItem('spood-running'); } catch (e) {} });
   // off screen mid-stack: a kill from here on isn't the cores' fault
-  document.addEventListener('visibilitychange', () => {
+  document.addEventListener('visibilitychange', async () => {
     if (!busy) return;
+    showMaths();                                          // no drawing while off screen
+    // the screen lock is dropped whenever the app leaves the screen; take it back on return
+    if (!document.hidden && (!wake || wake.released)) { try { wake = await navigator.wakeLock?.request('screen'); } catch (e) { wake = null; } }
     try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) {}
   });
   function setCut(n) {
@@ -395,6 +449,9 @@ body.rt-open { overflow: hidden; }
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
+    if (maths) maths.reset(files.length);
+    showMaths();
+    if (!retrySide) { if ($('bgKeep').checked) keepGoing(); else $('bgNow').hidden = !self.SpoodKeepAlive; }
     t0 = performance.now(); setProgress(0, 'Reading photos');
     try { wake = await navigator.wakeLock?.request('screen'); } catch (e) { wake = null; }
     const lowMem = (navigator.deviceMemory || 8) <= 4;
@@ -409,7 +466,7 @@ body.rt-open { overflow: hidden; }
       try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) { /* private mode */ }
       if (cutShort) log(`fewer cores: ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen`);
       lastTame = $('tame').checked;
-      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas), tame: lastTame } });
+      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas), tame: lastTame, peek: !!maths && mathsOn } });
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -632,7 +689,12 @@ body.rt-open { overflow: hidden; }
     done();
     if (worker) { worker.terminate(); engineStatus('restarting…'); startWorker(); }
   }
-  function done() { busy = false; refreshGo(); try { wake?.release(); localStorage.removeItem('spood-running'); } catch (e) {} wake = null; }
+  function done() {
+    busy = false; refreshGo(); try { wake?.release(); localStorage.removeItem('spood-running'); } catch (e) {} wake = null;
+    if (maths) maths.stop();
+    $('popOut').hidden = true; $('bgNow').hidden = true;
+    if (self.SpoodKeepAlive) SpoodKeepAlive.stop();
+  }
 
   $('save').addEventListener('click', save);
   $('share').addEventListener('click', async () => {

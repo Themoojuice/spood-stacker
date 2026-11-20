@@ -7,3 +7,4 @@ retouch-effect-out/
 tools/node_modules/
 tools/package-lock.json
 __pycache__/
+trace.json

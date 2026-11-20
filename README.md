@@ -7,7 +7,7 @@ Focus stacking for handheld macro bursts, as an installable web app that runs en
 ## Use it on Android
 1. Open the link above in **Chrome**, then tap **Install app** (or ⋮ → *Add to home screen* → *Install*).
 2. In Gallery, select a burst (2–30 photos of the same subject), tap **Share**, then choose **Spood Stacker**.
-3. Keep the screen open while it works. The result is saved to **Downloads** and shown in the app.
+3. Keep the screen open while it works (or try **Keep stacking if I switch apps**, below). The result is saved to **Downloads** and shown in the app.
 
 You can also open the app and tap **Tap to choose photos**. Nothing is uploaded: stacking runs on the device (OpenCV.js in a Web Worker).
 
@@ -34,6 +34,19 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 - **Paint**: paint over the halo; the pixels come from the chosen photo. **Stack** as the source paints the automatic result back.
 - Two fingers zoom and pan. **Hold to peek** shows the chosen photo across the whole frame. **Undo** takes back one stroke.
 - **Done** saves a `-retouched.jpg` beside the original, with the same EXIF.
+
+### Watch the maths
+While it stacks, the app animates what the engine is actually doing, from the engine's own working data (`maths.js`, fed by `opts.onPeek` in `engine.js`): each photo's focus map, the focus order (the photos' similarity grid and its Fiedler vector), the AKAZE landmarks, the RANSAC matches and the homography they agree on, every line-up drawn on the reference with your hand's path through the burst, the optical flow, the per-pixel vote for the sharpest photo (coloured by focus order, a rough depth map) and the merged strips as they land. Each scene has its equation and a line on what it means. **Hide the maths** puts the old progress screen back (remembered). The previews are small and read-only: the stack is identical with them on or off, and they cost about 2% of the time (measured in headless Chromium).
+
+### Switching apps while it stacks (experimental)
+Android closes a browser page that's been off screen for a while. Two things may keep a stack going:
+- **Keep stacking if I switch apps**: plays a near-silent hum (brown noise 56 dB below full scale, which Chrome counts as sound and a phone speaker barely plays) and shows the stack's progress, with the maths view as its picture, in a media notification. Chrome doesn't freeze a page that is playing sound. Also on the stacking screen as **Keep going if I switch apps**, for stacks started from the share sheet.
+- **Pop out**: the maths view in a picture-in-picture window over other apps.
+
+Whether either survives a big stack on your phone is not known yet: `lab.html` (open `/lab.html` on the app's address) tests it. It loads the phone like a big stack (busy cores, gigabytes held), records a heartbeat every second in storage that survives the page being killed, and after you come back from another app shows whether the work kept going, paused or was killed, with a **Copy results** button.
+
+### Stacking on a computer instead
+`node tools/serve.js` (after `cd tools && npm install`) runs the same engine on a computer, on several cores, and serves a page: open `http://<computer>:8790` on the phone (same Wi-Fi), pick a burst, send it, and leave; the page shows the progress and the result (sharpened, 4:4:4 JPEG with the reference photo's EXIF). From outside the house, put the computer on Tailscale and use its `https://<name>.ts.net` address (`tailscale serve 8790`).
 
 ## How it works (`engine.js`)
 1. The photos are put in focus order. The reference is the photo that is sharpest in the centre of the frame. The black clamp edge of a clip-on lens is masked out. The clamp is fixed to the phone, so it is the same in every photo and its inner edge is the rim of the lens: near-black regions at the frame edge count as the clamp only if the ones present in (almost) every photo are matched by the outside of one circle or frame-shaped ellipse, with lit scene just inside the rim and the rim out near the frame edge. A black night background or a dark subject crossing the frame edge follows the subject's outline instead, and is kept.
