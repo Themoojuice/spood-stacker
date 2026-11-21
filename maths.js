@@ -174,13 +174,17 @@
       title: 'Who\'s sharpest where',
       eq: 'w<sub>i</sub>(x) = F<sub>i</sub>(x) u<sub>i</sub>(x) / Σ<sub>j</sub> F<sub>j</sub>(x) u<sub>j</sub>(x)',
       cap: 'Every spot votes for the photo with the most focus energy there, counting only where that photo agrees with the reference and can be trusted (u). Coloured by focus order, the votes make a rough depth map, and then it rises into one: height from focus order, your spider\'s colours on top. A rough 3D model from focus alone.' },
-    { id: 'merge', stage: ['Merging', 'Done'], nominal: 9000, weight: 1.6,
+    { id: 'merge', stage: ['Merging', 'Done'], nominal: 12000, weight: 1.6,
       title: 'Blending band by band (Laplacian pyramid)',
       eq: 'L<sub>k</sub> = G<sub>k</sub> − ↑G<sub>k+1</sub> &nbsp;·&nbsp; R = Σ<sub>k</sub> ↑(Σ<sub>i</sub> w<sub>i</sub><sup>k</sup> L<sub>i</sub><sup>k</sup>)',
-      cap: 'Each photo is split into bands of detail, from broad shading to single hairs. Broad bands blend smoothly by the weights; the finest come only from photos nearly as sharp as the best at that spot, so noise averages out.' }
+      cap: 'Each photo is split into bands of detail, from broad shading to single hairs. Broad bands blend smoothly by the weights; the finest come only from photos nearly as sharp as the best at that spot, so noise averages out. The grid re-enacts that on three of your photos at preview size (brightness only); then the real merged rows land.' },
+    { id: 'reveal', stage: ['Done'], nominal: 7000, weight: 0,
+      title: 'Your stack',
+      eq: S => S.sharp ? `sharp across ${Math.round(100 * S.sharp.stack)}% of the frame &nbsp;·&nbsp; best single photo ${Math.round(100 * S.sharp.bestShare)}%` : 'every spot from the photo sharpest there',
+      cap: 'Your best single photo, lined up, then the stack pulled across it, then a slow drift onto the stack\'s most detailed spot. Sharp means within a factor of ten of the frame\'s sharpest spots, on the focus maps the stacker chose photos by.' }
   ];
   const STAGE_RANK = ['Reading photos', 'Working out focus order', 'Lining up photos', 'Correcting movement', 'Choosing photos', 'Keeping photos for retouching', 'Merging', 'Done'];
-  const MERGE = SCENES.length - 1;
+  const MERGE = SCENES.findIndex(s => s.id === 'merge'), REVEAL = SCENES.findIndex(s => s.id === 'reveal');
   const NOM = id => SCENES.find(s => s.id === id).nominal;
   /** seconds from the first to the last photo of the burst, from the cameras' time stamps */
   function burstSpan(S) { const t = S.photos.filter(p => p && p.taken != null).map(p => p.taken); return t.length > 1 ? (Math.max(...t) - Math.min(...t)) / 1000 : null; }
@@ -246,7 +250,8 @@
           const k = Math.round(pos.get(b) * 255) * 3, l = 0.35 + 0.65 * d.val[i] / 255;
           D[q] = DEPTH[k] * l; D[q + 1] = DEPTH[k + 1] * l; D[q + 2] = DEPTH[k + 2] * l;
         });
-      } else if (name === 'box') S.box = d;
+      } else if (name === 'box') { S.box = d; if (d.best) d.best.canvas = toCanvas(d.best.img.w, d.best.img.h, d.best.img.data, 3); }
+      else if (name === 'sharp') S.sharp = d;
       else if (name === 'strip') {
         const c = toCanvas(d.data.w, d.data.h, d.data.data, 3);
         S.strips.push({ c, y0: d.y0, y1: d.y1, W: d.W, H: d.H, rgba: d.rgba, x0: d.x0 || 0, w: d.w || d.W });
@@ -264,7 +269,7 @@
     const has = {
       burst: () => S.photos.some(Boolean),
       read: () => S.photos.some(Boolean), order: () => !!S.order, features: () => !!S.feats, match: () => S.matches.length > 0,
-      aligned: () => !!S.aligned, flow: () => S.flows.length > 0, ghosts: () => !!S.ghosts, winners: () => !!S.winners, merge: () => !!S.box || S.strips.length > 0
+      aligned: () => !!S.aligned, flow: () => S.flows.length > 0, ghosts: () => !!S.ghosts, winners: () => !!S.winners, merge: () => !!S.box || S.strips.length > 0, reveal: () => !!S.fin
     };
     const engineRank = () => Math.max(0, STAGE_RANK.indexOf(S.stage));
     /** seconds the stack still needs, from its own progress (calibrated to time), or null this early */
@@ -310,6 +315,7 @@
     function show(k, now, scale = 1) {
       busy(2600 * scale, now);
       S.scene = k; S.sceneAt = now; S.scale = scale; S.trail = null; S.particles = null; S.flowShown = -1;
+      S.brisk = !S.full && scale < 0.75;                  // a short stack: the scene's close-ups are left out
       setText();
     }
     function setText() {
@@ -426,6 +432,17 @@
     }
 
     // ---------- a frame ----------
+    /** the end of the film, once the stack is done: the reveal and the closing card. Resolves when
+        it has played (about 7 s) or the picture is tapped. */
+    function finale(o = {}) {
+      if (!S) reset();
+      return new Promise(res => {
+        const now = performance.now();
+        S.fin = { secs: o.secs || null, done: false, resolve() { if (!this.done) { this.done = true; res(); } } };
+        S.held = false; S.manual = false; S.auto = REVEAL; S.autoAt = now; S.shown.add(REVEAL); S.revealP = null;
+        show(REVEAL, now, 1);
+      });
+    }
     function frame(now = performance.now()) {
       if (!S) reset();
       const dt = clamp(lastNow ? now - lastNow : 16, 0, 200); lastNow = now;
@@ -452,6 +469,7 @@
       g.restore();
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       hud(now);
+      if (S.fin && !S.fin.done && S.scene === REVEAL && t > SCENES[REVEAL].nominal) S.fin.resolve();
     }
 
     // ---------- the glass strips: title, equation, progress, the engine's own words ----------
@@ -541,7 +559,7 @@
           const arrived = S.photos.map((p, i) => p ? i : -1).filter(i => i >= 0);
           if (!arrived.length) return;
           // a slow tour of the photos (or the one tapped): the glow sweeps down, then the loupe
-          const per = 6200, picked = S.pick >= 0 && now - S.pickAt < per;
+          const per = S.brisk ? 3000 : 6200, picked = S.pick >= 0 && now - S.pickAt < per;
           const k = Math.floor(t / per);                 // chosen once per cycle, so a new arrival can't cut a look short
           if (k !== S.readCycle || S.readTour == null || !S.photos[S.readTour]) { S.readCycle = k; S.readTour = arrived[k % arrived.length]; }
           let cur = S.readTour;
@@ -568,7 +586,7 @@
           g.save(); g.globalAlpha *= mix; g.beginPath(); g.rect(r.x, r.y, r.w, r.h * sweep); g.clip(); g.drawImage(p.heat, r.x, r.y, r.w, r.h); g.restore();
           if (sweep < 1) { g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip(); const gr = g.createLinearGradient(0, yy - 14, 0, yy + 2); gr.addColorStop(0, 'rgba(254,196,136,0)'); gr.addColorStop(1, 'rgba(254,196,136,.85)'); g.fillStyle = gr; g.fillRect(r.x, yy - 14, r.w, 16); g.restore(); }
           label(g, `photo ${cur + 1}`, r.x + 6, r.y + 16, { size: 11, bg: 'rgba(11,17,16,.7)' });
-          if (p.loupe && p.loupe.length) this.loupe(p, r, local, now);
+          if (p.loupe && p.loupe.length && !S.brisk) this.loupe(p, r, local, now);
           this.curve(cur);
           // the one on show is ringed in the filmstrip; empty places are the photos still to come
           g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -696,7 +714,7 @@
           let cx = 0.5, cy = 0.5;
           if (pts && pts.length) { let sx = 0, sy = 0; for (let j = 0; j < pts.length; j += 2) { sx += pts[j]; sy += pts[j + 1]; } cx = lerp(0.5, sx / (pts.length / 2), 0.5); cy = lerp(0.5, sy / (pts.length / 2), 0.5); }
           // then right in on the strongest landmark, while its fingerprint is read out
-          const top = F && F.kp && F.kp[i] && F.kp[i].top, push = top && !reduced ? ease((lt - per * 0.5) / (per * 0.18)) * (1 - ease((lt - per * 0.9) / (per * 0.1))) : 0;
+          const top = F && F.kp && F.kp[i] && F.kp[i].top, push = top && !reduced && !S.brisk ? ease((lt - per * 0.5) / (per * 0.18)) * (1 - ease((lt - per * 0.9) / (per * 0.1))) : 0;
           S.featPush = push;
           S.camT = { z: 1 + 0.07 * ease(lt / per) + 1.1 * push, x: lerp(r.x + r.w * cx, top ? r.x + r.w * top.x : 0, push), y: lerp(r.y + r.h * cy, top ? r.y + r.h * top.y : 0, push) };
           if (push > 0 && push < 1) busy(60, now);
@@ -795,7 +813,7 @@
         },
         draw(t, now) {
           const A = area(), m = S.matchCur; if (!m) return;
-          const offA = m.fp ? 2600 : 0, offB = m.isrc.length >= 8 ? 3800 : 0, off = offA + offB, lt = S.matchLt - off;
+          const offA = m.fp && !S.brisk ? 2600 : 0, offB = m.isrc.length >= 8 && !S.brisk ? 3800 : 0, off = offA + offB, lt = S.matchLt - off;
           const [ba, bb] = S.matchBoxes, mix = S.matchMix, fr = (j, b) => { const r = fit(S.photos[j].w, S.photos[j].h, b); r.y = b.y + 4; return r; };   // to the top, leaving room below
           const ra = fr(m.cur, ba), rb = fr(m.against, bb);
           if (S.mainPrev && S.mainPrev[0] === 'm' && mix < 1) { const pm = S.matches[+S.mainPrev.slice(1)]; if (pm) { photoIn(pm.cur, fr(pm.cur, ba), 1 - mix); photoIn(pm.against, fr(pm.against, bb), 1 - mix); } }
@@ -919,8 +937,8 @@
           return al;
         },
         times() {
-          const n = S.aligned.Hs.filter(Boolean).length, step = clamp(3600 / Math.max(1, n - 1), 110, 450);
-          const s0 = 900, slide = 900, hold = s0 + Math.max(0, n - 2) * step + slide + 600;
+          const n = S.aligned.Hs.filter(Boolean).length, step = S.brisk ? clamp(1800 / Math.max(1, n - 1), 70, 300) : clamp(3600 / Math.max(1, n - 1), 110, 450);
+          const s0 = S.brisk ? 500 : 900, slide = S.brisk ? 600 : 900, hold = s0 + Math.max(0, n - 2) * step + slide + 600;
           return { step, s0, slide, hold, flat: hold + 900 };
         },
         layout(t) {
@@ -1038,8 +1056,8 @@
         },
         draw() {
           const f = S.flowCur, k = S.flowK, lt = S.flowLt; if (!f) return;
-          if (!reduced && lt > 1300) busy(60);             // the particles are always moving (the flicker before them needs no fast frames)
-          const fr = j => fit(S.photos[j].w, S.photos[j].h, S.flowMain), r = fr(f.cur), mix = S.flowMix, FL = 1300;
+          if (!reduced && lt > (S.brisk ? 0 : 1300)) busy(60);             // the particles are always moving (the flicker before them needs no fast frames)
+          const fr = j => fit(S.photos[j].w, S.photos[j].h, S.flowMain), r = fr(f.cur), mix = S.flowMix, FL = S.brisk ? 0 : 1300;
           if (S.mainPrev && S.mainPrev[0] === 'w' && mix < 1) { const pf = S.flows[+S.mainPrev.slice(1)]; if (pf) photoIn(pf.cur, fr(pf.cur), 1 - mix); }
           ring([f.cur]);
           if (lt < FL && S.aligned && S.photos[S.aligned.ref]) { this.flicker(f, lt, r, mix); return; }
@@ -1197,7 +1215,7 @@
           });
           S.camT = { z: 1, still: true };
         },
-        TR: 5600,                                          // when the vote rises into a relief
+        get TR() { return S.brisk ? 3400 : 5600; },        // when the vote rises into a relief
         draw(t, now) {
           const A = area(), wn = S.winners, r = S.winRect, n = wn.order.length;
           if (t >= this.TR) { this.relief(t - this.TR, now, r); this.legend(A, wn, n, -1); return; }
@@ -1305,63 +1323,156 @@
       },
 
       merge: {
+        get T1() { return S.brisk ? 2600 : 4600; },        // the band grid gives way to the merged rows
+        grid() {
+          const A = area(), re = blendRe(), p0 = S.photos[re.ids[0]], asp = p0.w / p0.h, headW = 44, gap = 5, cols = 5, rows = re.ids.length + 1;
+          const tw = Math.min((A.w - headW - 6 - (cols - 1) * gap) / cols, ((A.h - 70) / rows - 9) * asp), th = tw / asp;
+          return { A, re, headW, gap, tw, th, x0: A.x + headW + 6, y0: A.y + 18, rowH: th + 9 };
+        },
         layout(t) {
-          // the photos go into the merge: they shrink into the middle of the frame and fade
-          const A = area(), c = { x: A.x + A.w / 2 - 8, y: A.y + A.h / 2 - 6, w: 16, h: 12 };
-          for (const i of seq()) place(i, t < 300 ? R(i) : c, { a: t < 900 ? 0.6 : 0 });
-          S.camT = { z: 1 };
+          const A = area();
+          if (t < this.T1) {
+            // three photos to the heads of the grid's rows; the rest step aside
+            const G = this.grid();
+            for (const i of seq()) { const k = G.re.ids.indexOf(i); if (k >= 0) place(i, fit(S.photos[i].w, S.photos[i].h, { x: A.x, y: G.y0 + k * G.rowH, w: G.headW, h: G.th }), { z: 1, a: 1 - ease((t - this.T1 + 500) / 500) }); else place(i, R(i), { a: 0 }); }
+          } else {
+            // the photos go into the merge: they shrink into the middle of the frame and fade
+            const c = { x: A.x + A.w / 2 - 8, y: A.y + A.h / 2 - 6, w: 16, h: 12 };
+            for (const i of seq()) place(i, c, { a: 0 });
+          }
+          S.camT = { z: 1, still: true };
         },
         draw(t, now) {
-          const A = area(), bx = S.box, W = bx ? bx.W : (S.strips[0] && S.strips[0].W), H = bx ? bx.H : (S.strips[0] && S.strips[0].H);
-          if (!W) return;
-          const pyrH = Math.min(52, A.h * 0.18), main = { x: A.x, y: A.y + pyrH + 8, w: A.w, h: A.h - pyrH - 8 };
-          // final: the cropped stack, filling the frame; before that, the whole working frame with
-          // the depth map underneath and finished rows painted over it as each strip lands
-          let fin = S.strips.find(s => s.rgba);
-          if (!fin && bx && S.strips.length && Math.max(...S.strips.map(s => s.y1)) >= H) {
-            // every strip is in: put them together once and keep only the crop, as the app will
-            const sw = S.strips[0].c.width, sh = Math.round(H * sw / W), all = canvasOf(sw, sh), ag = all.getContext('2d');
-            for (const st of S.strips) ag.drawImage(st.c, 0, Math.round(st.y0 / H * sh), sw, Math.max(1, Math.round((st.y1 - st.y0) / H * sh)));
-            const b = bx.box, cw2 = Math.max(1, Math.round(b.w / W * sw)), ch2 = Math.max(1, Math.round(b.h / H * sh)), crop = canvasOf(cw2, ch2);
-            crop.getContext('2d').drawImage(all, Math.round(b.x / W * sw), Math.round(b.y / H * sh), cw2, ch2, 0, 0, cw2, ch2);
-            fin = { c: crop, rgba: true, w: b.w, y0: 0, y1: b.h, assembled: true, at: now };
-            S.strips = [fin];
+          const A = area(), T1 = this.T1;
+          if (t < T1 + 500) { g.save(); g.globalAlpha *= 1 - ease((t - T1) / 500); this.bands(t, now); g.restore(); }
+          if (t > T1) { g.save(); g.globalAlpha *= reduced ? 1 : ease((t - T1) / 500); this.rows(t, now, A); g.restore(); }
+        },
+        /** the band grid: rows = three of your photos and their blend, columns = detail bands to coarse */
+        bands(t, now) {
+          const G = this.grid(), re = G.re, n = re.ids.length, names = ['L0 fine', 'L1', 'L2', 'G coarse', '= result'];
+          busy(60, now);
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+          names.forEach((nm, c) => label(g, nm, G.x0 + c * (G.tw + G.gap) + G.tw / 2, G.y0 - 5, { size: 8.5, align: 'center', color: C.muted }));
+          const col = reduced ? 9 : Math.floor((t - 600) / 650);  // the blend fills in a band at a time
+          for (let r = 0; r <= n; r++) for (let c = 0; c < 5; c++) {
+            const x = G.x0 + c * (G.tw + G.gap), y = G.y0 + r * G.rowH, blendRow = r === n;
+            let img = null;
+            if (!blendRow && c < 4) img = re.cells[r][c];
+            if (blendRow && c < 4 && col >= c) img = re.blend[c];
+            if (blendRow && c === 4 && col >= 4) img = re.result;
+            if (!blendRow && c === 4) continue;
+            g.strokeStyle = blendRow ? (col === c ? C.amber : 'rgba(255,179,92,.35)') : C.grid; g.strokeRect(x - 0.5, y - 0.5, G.tw + 1, G.th + 1);
+            if (!img) continue;
+            const a = blendRow ? (reduced ? 1 : ease((t - 600 - c * 650) / 400)) : (reduced ? 1 : ease((t - 200) / 400));
+            g.save(); g.globalAlpha *= a; g.imageSmoothingEnabled = c > 0 && c < 4 ? false : true; g.drawImage(img, x, y, G.tw, G.th);
+            if (blendRow && c < 3) g.drawImage(re.tints[c], x, y, G.tw, G.th);
+            g.restore();
           }
+          // the row heads: each photo's colour (focus order), and the blend
+          re.ids.forEach((ph, r) => { g.fillStyle = css(DEPTH, orderPos(ph)); g.fillRect(G.x0 - 4, G.y0 + r * G.rowH, 2, G.th); });
+          label(g, 'blend', G.x0 - 8, G.y0 + n * G.rowH + G.th / 2 + 3, { size: 9, align: 'right', color: C.amber, weight: 600 });
+          const ty = G.y0 + (n + 1) * G.rowH + 6, A = G.A;
+          wrapLabel('Fine bands: every spot takes the photo with the most detail there (tint = which photo). Broad shading: averaged, weighted by sharpness.', A.x, ty, A.w, { size: 9, color: C.ink });
+          label(g, `re-enacted on ${n} of your photos at preview size`, A.x, ty + 40, { size: 8.5, color: C.muted });
+          g.restore();
+          live(col < 0 ? 'each photo split into bands of detail' : col < 4 ? `blending band ${['L0', 'L1', 'L2', 'G'][col]}` : 'the bands added back up: one picture');
+        },
+        /** the real merged rows landing (then the finished, cropped stack), under the blend's bands */
+        rows(t, now, A) {
+          const bx = S.box, W = bx ? bx.W : (S.strips[0] && S.strips[0].W), H = bx ? bx.H : (S.strips[0] && S.strips[0].H);
+          const pyrH = Math.min(52, A.h * 0.18), main = { x: A.x, y: A.y + pyrH + 8, w: A.w, h: A.h - pyrH - 8 };
+          // the blend's bands across the top, the one in the light changing
+          const re = blendRe(), tiles = [...re.blend, re.result], L = tiles.length, tw = (A.w - (L - 1) * 6) / L, hl = Math.floor(now / 900) % L;
+          tiles.forEach((c, i) => {
+            const rr = fit(c.width, c.height, { x: A.x + i * (tw + 6), y: A.y, w: tw, h: pyrH - 12 });
+            g.imageSmoothingEnabled = i === 0 || i === L - 1; g.drawImage(c, rr.x, rr.y, rr.w, rr.h); g.imageSmoothingEnabled = true;
+            g.strokeStyle = i === hl ? C.accent : C.grid; g.strokeRect(rr.x - 0.5, rr.y - 0.5, rr.w + 1, rr.h + 1);
+            label(g, ['L0', 'L1', 'L2', 'G', '='][i] || '', rr.x + rr.w / 2, A.y + pyrH, { size: 9, align: 'center', color: i === hl ? C.accent : C.muted });
+          });
+          if (!W) { live('measuring texture and noise before merging'); return; }
+          const fin = finalCanvas(now);
           if (fin) {
             if (!fin.at) fin.at = now;
             const r = fit(fin.c.width, fin.c.height, main), z = 1 + 0.04 * ease((now - fin.at) / 8000);
             g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
             g.drawImage(fin.c, r.x - r.w * (z - 1) / 2, r.y - r.h * (z - 1) / 2, r.w * z, r.h * z); g.restore();
             live(`done: ${fmt(fin.w)} × ${fmt(fin.y1 - fin.y0)} px from ${bx ? bx.used.length : '?'} photos`);
-          } else {
-            const r = fit(W, H, main);
-            if (S.winners) { g.save(); g.globalAlpha *= 0.45; g.imageSmoothingEnabled = false; g.drawImage(S.winners.canvas, r.x, r.y, r.w, r.h); g.imageSmoothingEnabled = true; g.restore(); }
-            let lowest = 0;
-            for (const s of S.strips) {
-              const y0 = r.y + s.y0 / H * r.h, h = (s.y1 - s.y0) / H * r.h;
-              g.drawImage(s.c, r.x, y0, r.w, h + 0.5); lowest = Math.max(lowest, s.y1);
-            }
-            if (bx) { g.setLineDash([4, 4]); g.strokeStyle = 'rgba(255,179,92,.7)'; const b = bx.box; g.strokeRect(r.x + b.x / W * r.w, r.y + b.y / H * r.h, b.w / W * r.w, b.h / H * r.h); g.setLineDash([]); }
-            if (lowest < H) {
-              busy(60, now);                               // the edge of the merged rows pulses
-              const yy = r.y + lowest / H * r.h, pulse = 0.5 + 0.5 * Math.sin(now / 260);
-              const gr = g.createLinearGradient(0, yy, 0, yy + 18); gr.addColorStop(0, `rgba(79,194,185,${0.5 + 0.4 * pulse})`); gr.addColorStop(1, 'rgba(79,194,185,0)');
-              g.fillStyle = gr; g.fillRect(r.x, yy, r.w, 18);
-            }
-            live(S.strips.length ? `merged rows 0–${fmt(lowest)} of ${fmt(H)}` : 'measuring texture and noise before merging');
+            return;
           }
-          // the pyramid of the reference photo, fine to coarse (worked out here, for the picture)
-          if (!S.pyr) S.pyr = pyramid(photoAt(S.order ? S.order.ref : 0));
-          if (S.pyr) {
-            const L = S.pyr.length, tw = (A.w - (L - 1) * 6) / L, hl = Math.floor(now / 900) % L;
-            S.pyr.forEach((c, i) => {
-              const rr = fit(c.width, c.height, { x: A.x + i * (tw + 6), y: A.y, w: tw, h: pyrH - 12 });
-              g.imageSmoothingEnabled = false; g.drawImage(c, rr.x, rr.y, rr.w, rr.h); g.imageSmoothingEnabled = true;
-              g.strokeStyle = i === hl ? C.accent : C.grid; g.strokeRect(rr.x - 0.5, rr.y - 0.5, rr.w + 1, rr.h + 1);
-              label(g, i < L - 1 ? `L${i}` : `G${i}`, rr.x + rr.w / 2, A.y + pyrH, { size: 9, align: 'center', color: i === hl ? C.accent : C.muted });
-            });
+          const r = fit(W, H, main);
+          if (S.winners) { g.save(); g.globalAlpha *= 0.45; g.imageSmoothingEnabled = false; g.drawImage(S.winners.canvas, r.x, r.y, r.w, r.h); g.imageSmoothingEnabled = true; g.restore(); }
+          let lowest = 0;
+          for (const st of S.strips) { const y0 = r.y + st.y0 / H * r.h, h = (st.y1 - st.y0) / H * r.h; g.drawImage(st.c, r.x, y0, r.w, h + 0.5); lowest = Math.max(lowest, st.y1); }
+          if (bx) { g.setLineDash([4, 4]); g.strokeStyle = 'rgba(255,179,92,.7)'; const b = bx.box; g.strokeRect(r.x + b.x / W * r.w, r.y + b.y / H * r.h, b.w / W * r.w, b.h / H * r.h); g.setLineDash([]); }
+          if (lowest < H) {
+            busy(60, now);                               // the edge of the merged rows pulses
+            const yy = r.y + lowest / H * r.h, pulse = 0.5 + 0.5 * Math.sin(now / 260);
+            const gr = g.createLinearGradient(0, yy, 0, yy + 18); gr.addColorStop(0, `rgba(79,194,185,${0.5 + 0.4 * pulse})`); gr.addColorStop(1, 'rgba(79,194,185,0)');
+            g.fillStyle = gr; g.fillRect(r.x, yy, r.w, 18);
           }
+          live(S.strips.length ? `merged rows 0–${fmt(lowest)} of ${fmt(H)}` : bx ? 'merging: the rows land as they\'re finished' : 'measuring texture and noise before merging');
           void t;
+        }
+      },
+
+      reveal: {
+        layout() { for (const i of seq()) place(i, R(i), { a: 0 }); S.camT = { z: 1, still: true }; },
+        /** the stack, the best single photo (lined up and cropped the same), the stack's most detailed spot */
+        prep(now) {
+          if (S.revealP) return S.revealP;
+          const fin = finalCanvas(now); if (!fin) return null;
+          const c = fin.c, w = c.width, h = c.height, D = c.getContext('2d').getImageData(0, 0, w, h).data, gr = new Float32Array(w * h), E = new Float32Array(w * h);
+          for (let q = 0; q < w * h; q++) gr[q] = 0.299 * D[4 * q] + 0.587 * D[4 * q + 1] + 0.114 * D[4 * q + 2];
+          for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const q = y * w + x, l = gr[q - 1] + gr[q + 1] + gr[q - w] + gr[q + w] - 4 * gr[q]; E[q] = l * l; }
+          const r0 = Math.max(4, Math.round(w / 14)), B = boxBlur(E, w, h, r0);
+          let bq = 0; for (let y = r0; y < h - r0; y++) for (let x = r0; x < w - r0; x++) { const q = y * w + x; if (B[q] > B[bq]) bq = q; }
+          const best = S.box && S.box.best && S.box.best.canvas ? S.box.best : null;
+          return (S.revealP = { fin: c, best: best && best.canvas, bestI: best ? best.i : -1, spot: [(bq % w + 0.5) / w, (Math.floor(bq / w) + 0.5) / h] });
+        },
+        draw(t, now) {
+          const A = area(), P = this.prep(now);
+          if (!P) { label(g, 'putting your stack together…', A.x + A.w / 2, A.y + A.h / 2, { align: 'center', color: C.muted }); return; }
+          if (!reduced) busy(60, now);
+          const r = fit(P.fin.width, P.fin.height, A), hasBest = !!P.best, t0 = hasBest ? 0 : 3200;
+          const tt = t + t0, zk = reduced ? 0 : ease((tt - 3200) / 3800), z = 1 + 0.6 * zk;
+          // zoomed about the most detailed spot, which drifts towards the middle; the frame always covered
+          const fx = r.x + P.spot[0] * r.w, fy = r.y + P.spot[1] * r.h;
+          let dx = fx - (fx - r.x) * z + (r.x + r.w / 2 - fx) * 0.5 * zk, dy = fy - (fy - r.y) * z + (r.y + r.h / 2 - fy) * 0.5 * zk;
+          dx = clamp(dx, r.x + r.w - r.w * z, r.x); dy = clamp(dy, r.y + r.h - r.h * z, r.y);
+          const at = img => g.drawImage(img, dx, dy, r.w * z, r.h * z);
+          g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
+          const e = reduced ? (tt > 2300 ? 1 : 0) : ease((tt - 1400) / 1800), edge = r.x - 30 + e * (r.w + 60);
+          if (hasBest && e < 1) at(P.best);
+          if (e > 0) {
+            g.save(); if (e < 1) { g.beginPath(); g.rect(r.x, r.y, edge - r.x, r.h); g.clip(); } at(P.fin); g.restore();
+            if (e < 1) { const gr = g.createLinearGradient(edge - 14, 0, edge + 2, 0); gr.addColorStop(0, 'rgba(255,179,92,0)'); gr.addColorStop(1, 'rgba(255,179,92,.85)'); g.fillStyle = gr; g.fillRect(edge - 14, r.y, 16, r.h); }
+          }
+          g.restore();
+          const sh = S.sharp, pc = v => `${Math.round(100 * v)}%`;
+          if (hasBest && tt < 1400 + 1800) {
+            label(g, `your best single photo (photo ${P.bestI + 1})` + (sh ? ` · sharp across ${pc(sh.bestShare)}` : ''), r.x + 6, r.y + 16, { size: 10, bg: 'rgba(11,17,16,.75)', alpha: 1 - e });
+            if (e > 0.15) label(g, 'the stack' + (sh ? ` · ${pc(sh.stack)}` : ''), r.x + 6, r.y + 34, { size: 10, bg: 'rgba(11,17,16,.75)', color: C.accent, alpha: e });
+            live(e > 0 ? 'pulling focus from your best photo into the stack' : 'your best single photo, lined up and cropped like the stack');
+          } else live(sh ? `${(sh.stack / Math.max(1e-3, sh.bestShare)).toFixed(1)}× the sharp area of your best photo` : 'your stack');
+          this.card(tt);
+        },
+        /** the closing card: what went into it, in numbers */
+        card(tt) {
+          const a = reduced ? (tt > 3400 && tt < 6200 ? 1 : 0) : ease((tt - 3400) / 500) * (1 - ease((tt - 5800) / 500)); if (a <= 0.01) return;
+          const A = area(), sh = S.sharp, used = S.box ? S.box.used.length : S.photos.filter(Boolean).length, n = S.n || used;
+          const lm = S.matches.reduce((acc, m) => acc + (m.inliers || 0), 0), moved = S.flows.filter(f => f.accepted).length, secs = S.fin && S.fin.secs;
+          const head = sh ? `${(sh.stack / Math.max(1e-3, sh.bestShare)).toFixed(1)}× the sharp area of your best photo` : 'your stack';
+          const lines = [`${used} of ${n} photos used`, lm ? `${fmt(lm)} landmarks matched` : null,
+            moved ? `moved parts corrected in ${moved} photo${moved > 1 ? 's' : ''}` : 'nothing needed correcting for movement',
+            sh ? `sharp across ${Math.round(100 * sh.stack)}% of the frame (best photo ${Math.round(100 * sh.bestShare)}%)` : null,
+            secs ? `stacked in ${secs} s` : null].filter(Boolean);
+          const h = 30 + lines.length * 15, y = A.y + A.h - h - 6 + (1 - a) * 18;
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.globalAlpha *= a;
+          g.fillStyle = 'rgba(11,17,16,.86)'; roundRect(g, A.x + 6, y, A.w - 12, h, 9); g.fill();
+          g.strokeStyle = 'rgba(79,194,185,.45)'; g.stroke();
+          label(g, head, A.x + 16, y + 19, { size: 11.5, color: C.amber, weight: 600 });
+          lines.forEach((ln, k) => label(g, ln, A.x + 16, y + 37 + k * 15, { size: 10, color: C.ink }));
+          g.restore();
         }
       }
     };
@@ -1382,22 +1493,62 @@
     const winShare = ph => winMask(ph).share;
 
     /** a Laplacian pyramid of a photo's thumbnail: detail bands L0 (finest) .. and the coarse rest */
-    function pyramid(p) {
-      if (!p) return null;
+    const pdown = a => { const w = a.w >> 1, h = a.h >> 1, d = new Float32Array(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const q = 2 * y * a.w + 2 * x; d[y * w + x] = (a.d[q] + a.d[q + 1] + a.d[q + a.w] + a.d[q + a.w + 1]) / 4; } return { w, h, d }; };
+    const pup = (a, w, h) => { const d = new Float32Array(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const sx = Math.min(a.w - 1, (x - 0.5) / 2), sy = Math.min(a.h - 1, (y - 0.5) / 2), x0 = Math.max(0, Math.floor(sx)), y0 = Math.max(0, Math.floor(sy)), x1 = Math.min(a.w - 1, x0 + 1), y1 = Math.min(a.h - 1, y0 + 1), fx = clamp01(sx - x0), fy = clamp01(sy - y0); d[y * w + x] = lerp(lerp(a.d[y0 * a.w + x0], a.d[y0 * a.w + x1], fx), lerp(a.d[y1 * a.w + x0], a.d[y1 * a.w + x1], fx), fy); } return d; };
+    /** a box blur (mean over (2r+1)^2), rows then columns */
+    function boxBlur(A, w, h, r) {
+      const T = new Float32Array(w * h), O = new Float32Array(w * h), n = (2 * r + 1) ** 2;
+      for (let y = 0; y < h; y++) { let acc = 0; for (let x = -r; x < w; x++) { const xa = Math.min(w - 1, x + r); acc += A[y * w + xa]; if (x - r - 1 >= 0) acc -= A[y * w + x - r - 1]; if (x >= 0) T[y * w + x] = acc; } }
+      for (let x = 0; x < w; x++) { let acc = 0; for (let y = -r; y < h; y++) { const ya = Math.min(h - 1, y + r); acc += T[ya * w + x]; if (y - r - 1 >= 0) acc -= T[(y - r - 1) * w + x]; if (y >= 0) O[y * w + x] = acc / n; } }
+      return O;
+    }
+    /** a preview's brightness as a Laplacian pyramid: three detail bands and the coarse rest (cached) */
+    function bandsOf(p) {
+      if (p.bands) return p.bands;
       const w0 = p.w, h0 = p.h, src = p.thumb.getContext('2d').getImageData(0, 0, w0, h0).data;
-      let G = { w: w0, h: h0, d: new Float32Array(w0 * h0) };
+      let G = { w: w0, h: h0, d: new Float32Array(w0 * h0) }; const L = [];
       for (let i = 0; i < w0 * h0; i++) G.d[i] = 0.299 * src[4 * i] + 0.587 * src[4 * i + 1] + 0.114 * src[4 * i + 2];
-      const down = a => { const w = a.w >> 1, h = a.h >> 1, d = new Float32Array(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const q = 2 * y * a.w + 2 * x; d[y * w + x] = (a.d[q] + a.d[q + 1] + a.d[q + a.w] + a.d[q + a.w + 1]) / 4; } return { w, h, d }; };
-      const up = (a, w, h) => { const d = new Float32Array(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const sx = Math.min(a.w - 1, (x - 0.5) / 2), sy = Math.min(a.h - 1, (y - 0.5) / 2), x0 = Math.max(0, Math.floor(sx)), y0 = Math.max(0, Math.floor(sy)), x1 = Math.min(a.w - 1, x0 + 1), y1 = Math.min(a.h - 1, y0 + 1), fx = clamp01(sx - x0), fy = clamp01(sy - y0); d[y * w + x] = lerp(lerp(a.d[y0 * a.w + x0], a.d[y0 * a.w + x1], fx), lerp(a.d[y1 * a.w + x0], a.d[y1 * a.w + x1], fx), fy); } return d; };
-      const out = [];
-      for (let k = 0; k < 4 && G.w > 8; k++) {
-        const nx = down(G), u = up(nx, G.w, G.h), band = new Uint8Array(G.w * G.h);
-        for (let i = 0; i < band.length; i++) band[i] = Math.max(0, Math.min(255, 128 + (G.d[i] - u[i]) * (2.5 + k)));
-        out.push(toCanvas(G.w, G.h, band, 1));
-        G = nx;
+      for (let k = 0; k < 3; k++) { const nx = pdown(G), u = pup(nx, G.w, G.h), d = new Float32Array(G.w * G.h); for (let i = 0; i < d.length; i++) d[i] = G.d[i] - u[i]; L.push({ w: G.w, h: G.h, d }); G = nx; }
+      return (p.bands = { L, G });
+    }
+    const bandCanvas = (b, k) => toCanvas(b.w, b.h, Uint8Array.from(b.d, v => clamp(128 + v * [7, 4.5, 3.5][k], 0, 255)), 1);
+    const greyCanvas = b => toCanvas(b.w, b.h, Uint8Array.from(b.d, v => clamp(v, 0, 255)), 1);
+    /** the merge re-enacted on three of your photos at preview size: each detail band takes, at every
+        spot, the photo with the most energy there; the coarse rest is averaged, weighted by how sharp
+        each photo is around the spot; collapsed back into one picture */
+    function blendRe() {
+      if (S.blendRe) return S.blendRe;
+      let ids = S.winners ? S.winners.used.filter(i => S.photos[i]).sort((a, b) => winShare(b) - winShare(a)).slice(0, 3) : [];
+      if (ids.length < 2) ids = seq().slice(0, 3);
+      const w0 = S.photos[ids[0]].w; ids = ids.filter(i => S.photos[i].w === w0 && S.photos[i].h === S.photos[ids[0]].h);
+      ids.sort((a, b) => orderPos(a) - orderPos(b));
+      const B = ids.map(i => bandsOf(S.photos[i])), g0 = B[0].G;
+      const blendL = B[0].L.map((s0, k) => {
+        const N = s0.w * s0.h, E = B.map(b => boxBlur(Float32Array.from(b.L[k].d, v => v * v), s0.w, s0.h, 1)), d = new Float32Array(N), who = new Uint8Array(N);
+        for (let q = 0; q < N; q++) { let bi = 0; for (let j = 1; j < B.length; j++) if (E[j][q] > E[bi][q]) bi = j; d[q] = B[bi].L[k].d[q]; who[q] = bi; }
+        return { w: s0.w, h: s0.h, d, who };
+      });
+      const l0 = B[0].L[0], Wt = B.map(b => { const e = boxBlur(Float32Array.from(b.L[0].d, v => v * v), l0.w, l0.h, 6), o = new Float32Array(g0.w * g0.h); for (let y = 0; y < g0.h; y++) for (let x = 0; x < g0.w; x++) o[y * g0.w + x] = e[Math.min(l0.h - 1, Math.floor((y + 0.5) * l0.h / g0.h)) * l0.w + Math.min(l0.w - 1, Math.floor((x + 0.5) * l0.w / g0.w))]; return o; });
+      const Gd = new Float32Array(g0.w * g0.h);
+      for (let q = 0; q < Gd.length; q++) { let sw = 0, sm = 0; for (let j = 0; j < B.length; j++) { const w = Wt[j][q] + 1e-6; sw += w; sm += w * B[j].G.d[q]; } Gd[q] = sm / sw; }
+      let R = { w: g0.w, h: g0.h, d: Gd };
+      for (let k = 2; k >= 0; k--) { const u = pup(R, blendL[k].w, blendL[k].h); for (let q = 0; q < u.length; q++) u[q] += blendL[k].d[q]; R = { w: blendL[k].w, h: blendL[k].h, d: u }; }
+      const tint = bl => toCanvas(bl.w, bl.h, bl.who, 1, (i, D, q) => { const kk = Math.round(orderPos(ids[bl.who[i]]) * 255) * 3; D[q] = DEPTH[kk]; D[q + 1] = DEPTH[kk + 1]; D[q + 2] = DEPTH[kk + 2]; D[q + 3] = 50; });
+      return (S.blendRe = { ids, cells: B.map(b => [...b.L.map((x, k) => bandCanvas(x, k)), greyCanvas(b.G)]),
+        blend: [...blendL.map((x, k) => bandCanvas(x, k)), greyCanvas({ w: g0.w, h: g0.h, d: Gd })], tints: blendL.map(tint), result: greyCanvas(R) });
+    }
+    /** the finished stack, put together from the merged rows and cropped as the app crops it */
+    function finalCanvas(now) {
+      const bx = S.box; let fin = S.strips.find(s => s.rgba);
+      if (!fin && bx && S.strips.length && Math.max(...S.strips.map(s => s.y1)) >= bx.H) {
+        const W = bx.W, H = bx.H, sw = S.strips[0].c.width, sh = Math.round(H * sw / W), all = canvasOf(sw, sh), ag = all.getContext('2d');
+        for (const st of S.strips) { const y0 = Math.floor(st.y0 / H * sh); ag.drawImage(st.c, 0, y0, sw, Math.max(1, Math.ceil(st.y1 / H * sh) - y0 + 1)); }   // a row's overlap: no seams
+        const b = bx.box, cw2 = Math.max(1, Math.round(b.w / W * sw)), ch2 = Math.max(1, Math.round(b.h / H * sh)), crop = canvasOf(cw2, ch2);
+        crop.getContext('2d').drawImage(all, Math.round(b.x / W * sw), Math.round(b.y / H * sh), cw2, ch2, 0, 0, cw2, ch2);
+        fin = { c: crop, rgba: true, w: b.w, y0: 0, y1: b.h, assembled: true, at: now };
+        S.strips = [fin];
       }
-      out.push(toCanvas(G.w, G.h, Uint8Array.from(G.d, v => Math.max(0, Math.min(255, v))), 1));
-      return out;
+      return fin || null;
     }
 
     // ---------- touch: tap to hold, swipe to look back ----------
@@ -1408,6 +1559,7 @@
       if (!down || !S) return;
       const dx = e.clientX - down.x, dy = e.clientY - down.y, dt = performance.now() - down.t, now = performance.now();
       down = null;
+      if (S.fin && !S.fin.done && S.scene === REVEAL) { S.fin.resolve(); return; }   // a tap skips the reveal
       if (Math.abs(dx) > 40 && Math.abs(dx) > 1.5 * Math.abs(dy)) {
         // right = back to an earlier scene, left = forward again, as far as the engine has got
         const reached = [...S.shown].sort((a, b) => a - b), at = reached.indexOf(S.scene);
@@ -1438,7 +1590,7 @@
     }
     reset();
     return {
-      reset, peek, progress, log, frame,
+      reset, peek, progress, log, frame, finale,
       start() { if (running) return; running = true; lastNow = 0; raf = requestAnimationFrame(loop); },
       stop() { running = false; cancelAnimationFrame(raf); },
       get state() { return S; },

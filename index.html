@@ -605,12 +605,17 @@ body.rt-open { overflow: hidden; }
   }
 
   async function finish(out) {
+    const secs = Math.round((performance.now() - t0) / 1000);
+    // the maths view ends the film on your stack (about 7 s, a tap skips it) while the JPEG is made
+    const showing = maths && mathsOn && !document.hidden && !$('maths').hidden;
+    const reveal = showing ? Promise.race([maths.finale({ secs }), new Promise(r => setTimeout(r, 9000))]) : null;
+    if (reveal) { maths.start(); setProgress(1, 'Done'); $('eta').textContent = 'Your stack is ready: tap the picture to skip ahead.'; }
     refPhoto = out.ref || 0;
     basePixels = autoBase = new ImageData(new Uint8ClampedArray(out.data.buffer || out.data), out.width, out.height);
     loupeAt = null; resultAmt = sharpAmt;
     const b = await makeJpeg(basePixels, amount());
     await setResult(b, `spood-stack-${stamp()}.jpg`, out.width, out.height);
-    const secs = Math.round((performance.now() - t0) / 1000);
+    if (reveal) { save(); await reveal; }                 // saved first, so leaving during the reveal loses nothing
     const used = $('selection').dataset.used || files.length;
     $('resultInfo').textContent = `${used} of ${files.length} photos stacked in ${secs} s · ${out.width} × ${out.height} px`;
     const sn = $('sizeNote');
@@ -625,7 +630,7 @@ body.rt-open { overflow: hidden; }
     $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
     $('tameBox').hidden = !!lastTame;                      // offered only after a stack made without it
     if (lastTame) $('resultInfo').textContent += ' · wet/shiny subject mode';
-    save();
+    if (!reveal) save();
     done();
     scrollTo({ top: 0, behavior: 'smooth' });
   }

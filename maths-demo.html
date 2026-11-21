@@ -81,6 +81,8 @@ button.primary { background: var(--accent); color: #062523; border-color: transp
       else if (e.kind === 'progress') view.progress(e.p, e.s);
       else if (e.kind === 'log') view.log(e.m);
     }, e.t / speed));
+    // the stack is done: the reveal and the closing card, as in the app
+    timers.push(setTimeout(() => { view.finale({ secs: Math.round(dur / speed / 1000) }); }, dur / speed + 400));
   }
   $('replay').addEventListener('click', play);
   // test hook: ?scene=k jumps to scene k with every recorded preview in hand
