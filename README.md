@@ -42,6 +42,8 @@ While it stacks, the app animates what the engine is actually doing, from the en
 - **Your photos move as one set** between scenes: filmstrip, focus line, the deck that collapses onto the reference, the legend of the vote.
 - **Tap** the picture to hold a scene (the stack carries on), **swipe right** to look back at an earlier one, left to come forward again, and tap a photo in the focus scene's filmstrip to look at it. With the phone's reduce-motion setting it cuts and fades instead of gliding.
 - **Hide the maths** puts the old progress screen back (remembered).
+- **Replay the maths** (on the result) plays the whole film again at its full length, close-ups and all, from the previews kept since the stack, ending on the reveal.
+- **Save the maths as a video** records that replay from the picture itself (MP4 where the browser can make it, as Chrome on Android can; otherwise WebM), about a minute and a half, 4:5, and saves it to Downloads, with **Share the video…** where the phone offers it.
 
 The previews are small and read-only: the stack is identical with them on or off. On the 2-core test machine, with software drawing, the view costs about 3–7% of the stack's time (it draws at 30 frames a second only while something moves, 12 otherwise).
 

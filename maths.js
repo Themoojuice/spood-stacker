@@ -295,9 +295,23 @@
       }
       return D;
     }
+    function replayStep(now) {
+      const R = S.rep, k = S.auto, e = now - S.autoAt, D = SCENES[k].nominal;
+      R.frac = clamp01((R.before + Math.min(e, D)) / R.total);
+      if (k === REVEAL || e < D) return;                 // the reveal ends the replay itself
+      let next = k + 1; while (next < REVEAL && !has[SCENES[next].id]()) next++;
+      R.before += D;
+      if (next >= REVEAL) {
+        S.fin = { secs: S.secs || null, done: false, resolve() { if (!this.done) { this.done = true; if (S.rep === R) R.resolve(); } } };
+        next = REVEAL;
+      }
+      S.auto = next; S.autoAt = now; S.shown.add(next);
+      if (!S.manual) show(next, now, 1);
+    }
     function advance(now, dt) {
       if (S.freeze) return;                              // tests: stay on the scene that was set
       if (S.held) { S.autoAt += dt; if (!S.manual) S.sceneAt += dt; return; }   // held: time stands still for the scene
+      if (S.rep) { replayStep(now); return; }
       let avail = S.auto;
       for (let k = S.auto + 1; k < SCENES.length; k++) if (has[SCENES[k].id]()) avail = k;
       if (avail === S.auto) return;
@@ -434,11 +448,24 @@
     // ---------- a frame ----------
     /** the end of the film, once the stack is done: the reveal and the closing card. Resolves when
         it has played (about 7 s) or the picture is tapped. */
-    function finale(o = {}) {
+    /** the whole film again, every scene at its full length (no close-ups left out), from the
+        previews kept since the stack, ending on the reveal. Resolves when the reveal has played. */
+    function replay() {
       if (!S) reset();
       return new Promise(res => {
+        const now = performance.now(), total = SCENES.filter((sc, k) => k === REVEAL || has[sc.id]()).reduce((a, sc) => a + sc.nominal, 0);
+        if (S.fin && !S.fin.done) S.fin.done = true;
+        S.fin = null; S.full = true; S.held = false; S.manual = false;
+        const R = S.rep = { before: 0, total, frac: 0, resolve() { if (S.rep === R) { S.rep = null; S.full = false; } res(); } };
+        S.auto = 0; S.autoAt = now; S.shown = new Set([0]); show(0, now, 1);
+      });
+    }
+    function finale(o = {}) {
+      if (!S) reset();
+      if (o.secs) S.secs = o.secs;
+      return new Promise(res => {
         const now = performance.now();
-        S.fin = { secs: o.secs || null, done: false, resolve() { if (!this.done) { this.done = true; res(); } } };
+        S.fin = { secs: S.secs || null, done: false, resolve() { if (!this.done) { this.done = true; res(); } } };
         S.held = false; S.manual = false; S.auto = REVEAL; S.autoAt = now; S.shown.add(REVEAL); S.revealP = null;
         show(REVEAL, now, 1);
       });
@@ -483,8 +510,9 @@
       g.fillStyle = gr; g.fillRect(0, cssH - HUD_BOTTOM - 8, cssW, HUD_BOTTOM + 8);
       // the engine's real progress (the scene may trail it a little)
       g.fillStyle = 'rgba(79,194,185,.16)'; g.fillRect(0, 0, cssW, 3);
-      g.fillStyle = C.accent; g.fillRect(0, 0, cssW * clamp01(S.p), 3);
-      label(g, `${S.stage.toLowerCase()} · ${Math.round(S.p * 100)}%`, 12, 17, { size: 10, color: C.muted });
+      const pp = S.rep ? S.rep.frac : S.p;
+      g.fillStyle = C.accent; g.fillRect(0, 0, cssW * clamp01(pp), 3);
+      label(g, S.rep ? `replay · ${Math.round(pp * 100)}%` : `${S.stage.toLowerCase()} · ${Math.round(S.p * 100)}%`, 12, 17, { size: 10, color: C.muted });
       // where we are among the scenes: filled = on screen, ringed = reached
       for (let k = 0; k < SCENES.length; k++) {
         const x = cssW - 14 - (SCENES.length - 1 - k) * 11, y = 13;
@@ -500,7 +528,7 @@
       g.save(); g.beginPath(); g.rect(10, cssH - HUD_BOTTOM, cssW - 20, HUD_BOTTOM); g.clip();
       let ls = 10.5; g.font = `500 ${ls}px ${MONO}`; while (ls > 8.5 && g.measureText(liveText).width > cssW - 24) { ls -= 0.5; g.font = `500 ${ls}px ${MONO}`; }
       label(g, liveText, 12, cssH - 19, { size: ls, color: C.amber });
-      const last = S.logs[S.logs.length - 1];
+      const last = S.rep ? 'made with Spood Stacker · every picture is this stack\'s own photos' : S.logs[S.logs.length - 1];   // a replay has no engine talking
       if (last) label(g, '› ' + last, 12, cssH - 6, { size: 9.5, color: C.muted });
       g.restore();
       // held, or looking back
@@ -1391,6 +1419,18 @@
           });
           if (!W) { live('measuring texture and noise before merging'); return; }
           const fin = finalCanvas(now);
+          if (fin && S.rep) {
+            const r = fit(fin.c.width, fin.c.height, main), q = reduced ? 1 : clamp01((t - this.T1 - 400) / Math.max(1500, SCENES[MERGE].nominal - this.T1 - 2200)), b = bx.box, wn = S.winners;
+            if (wn) { g.save(); g.globalAlpha *= 0.45; g.imageSmoothingEnabled = false; g.drawImage(wn.canvas, b.x / W * wn.w, b.y / H * wn.h, b.w / W * wn.w, b.h / H * wn.h, r.x, r.y, r.w, r.h); g.imageSmoothingEnabled = true; g.restore(); }
+            g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h * q); g.clip(); g.drawImage(fin.c, r.x, r.y, r.w, r.h); g.restore();
+            if (q < 1) {
+              busy(60, now);
+              const yy = r.y + q * r.h, pulse = 0.5 + 0.5 * Math.sin(now / 260), gr = g.createLinearGradient(0, yy, 0, yy + 18);
+              gr.addColorStop(0, `rgba(79,194,185,${0.5 + 0.4 * pulse})`); gr.addColorStop(1, 'rgba(79,194,185,0)'); g.fillStyle = gr; g.fillRect(r.x, yy, r.w, 18);
+            }
+            live(q < 1 ? `merged rows landing: ${Math.round(q * 100)}%` : `done: ${fmt(fin.w)} × ${fmt(fin.y1 - fin.y0)} px from ${bx.used.length} photos`);
+            return;
+          }
           if (fin) {
             if (!fin.at) fin.at = now;
             const r = fit(fin.c.width, fin.c.height, main), z = 1 + 0.04 * ease((now - fin.at) / 8000);
@@ -1584,13 +1624,17 @@
     // ~30 frames a second while something moves, ~12 while the scene only breathes
     function loop(now) {
       if (!running) return;
-      const every = S && now < S.busyUntil ? 1000 / TUNE.fps : 1000 / TUNE.idle;
+      const every = S && (S.rec || now < S.busyUntil) ? 1000 / TUNE.fps : 1000 / TUNE.idle;
       if (now - lastFrame >= every - 2) { lastFrame = now; frame(now); }
       raf = requestAnimationFrame(loop);
     }
     reset();
     return {
-      reset, peek, progress, log, frame, finale,
+      reset, peek, progress, log, frame, finale, replay,
+      /** while a video is being recorded: draw every frame */
+      recording(on) { if (S) S.rec = !!on; },
+      /** whether there's a whole stack's worth of previews to replay */
+      get canReplay() { return !!(S && S.photos.some(Boolean) && S.strips.length && S.box); },
       start() { if (running) return; running = true; lastNow = 0; raf = requestAnimationFrame(loop); },
       stop() { running = false; cancelAnimationFrame(raf); },
       get state() { return S; },

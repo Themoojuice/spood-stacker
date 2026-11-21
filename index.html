@@ -204,6 +204,13 @@ body.rt-open { overflow: hidden; }
       <a id="openFull" target="_blank" rel="noopener"><img id="result" alt="Your stacked image"></a>
       <figcaption id="resultInfo"></figcaption>
     </figure>
+    <div id="mathsDock"></div>
+    <div class="row work-links" id="mathsAfter" hidden>
+      <button class="linkbtn" id="replayMaths" type="button">Replay the maths</button>
+      <button class="linkbtn" id="videoMaths" type="button">Save the maths as a video</button>
+      <button class="linkbtn" id="shareVideo" type="button" hidden>Share the video…</button>
+    </div>
+    <p class="meta" id="videoNote" hidden></p>
     <p class="meta warn" id="sizeNote" hidden></p>
     <div class="sharp" id="sharpBox">
       <div class="sharp-head"><label for="sharp">Sharpening</label><output id="sharpVal" for="sharp">70%</output></div>
@@ -454,6 +461,7 @@ body.rt-open { overflow: hidden; }
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
     if (maths) maths.reset(files.length);
+    dockMaths(false); $('mathsAfter').hidden = true; vnote('');
     showMaths();
     if (!retrySide) { if ($('bgKeep').checked) keepGoing(); else $('bgNow').hidden = !self.SpoodKeepAlive; }
     t0 = performance.now(); setProgress(0, 'Reading photos');
@@ -631,9 +639,57 @@ body.rt-open { overflow: hidden; }
     $('tameBox').hidden = !!lastTame;                      // offered only after a stack made without it
     if (lastTame) $('resultInfo').textContent += ' · wet/shiny subject mode';
     if (!reveal) save();
+    $('mathsAfter').hidden = !(maths && maths.canReplay); $('shareVideo').hidden = true; vnote('');
     done();
     scrollTo({ top: 0, behavior: 'smooth' });
   }
+
+  // ---------- after the stack: the maths again, at its full length, and as a video ----------
+  function dockMaths(on) {
+    const m = $('maths');
+    if (on) { $('mathsDock').appendChild(m); m.hidden = false; }
+    else if (m.parentNode !== S.work) S.work.insertBefore(m, $('stage'));
+  }
+  function vnote(t) { $('videoNote').textContent = t; $('videoNote').hidden = !t; }
+  let replaying = false, lastVideo = null;
+  async function replayMaths(record) {
+    if (!maths || !maths.canReplay || replaying) return;
+    replaying = true; $('replayMaths').disabled = $('videoMaths').disabled = true;
+    dockMaths(true); $('maths').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch (e) { lock = null; }
+    let rec = null, type = null; const chunks = [];
+    if (record) {
+      const c = $('mathsCanvas');
+      type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(t => self.MediaRecorder && MediaRecorder.isTypeSupported(t));
+      if (!type || !c.captureStream) vnote("This browser can't record the picture as a video.");
+      else {
+        maths.recording(true);
+        rec = new MediaRecorder(c.captureStream(30), { mimeType: type, videoBitsPerSecond: 6e6 });
+        rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+        rec.start(1000);
+        vnote('Recording the maths: keep this screen open until it ends (about a minute and a half).');
+      }
+    } else vnote('Tap the picture to hold a scene, swipe right to look back.');
+    maths.start();
+    await maths.replay();
+    if (rec) {
+      await new Promise(r => setTimeout(r, 1500));          // a moment on your stack to end on
+      const stopped = new Promise(r => { rec.onstop = r; }); rec.stop(); await stopped; maths.recording(false);
+      const ext = type.includes('mp4') ? 'mp4' : 'webm', blob = new Blob(chunks, { type: type.split(';')[0] }), name = `spood-maths-${stamp()}.${ext}`, url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      lastVideo = new File([blob], name, { type: blob.type });
+      $('shareVideo').hidden = !(navigator.canShare && navigator.canShare({ files: [lastVideo] }));
+      vnote(`Saved to Downloads as ${name} (${(blob.size / 1048576).toFixed(1)} MB${ext === 'webm' ? ', WebM: some apps want MP4' : ''}).`);
+    } else vnote('');
+    try { await lock?.release(); } catch (e) { /* already let go */ }
+    replaying = false; $('replayMaths').disabled = $('videoMaths').disabled = false;
+    setTimeout(() => { if (!replaying && !busy) maths.stop(); }, 4000);   // the last frame stays; the drawing stops
+  }
+  $('replayMaths').addEventListener('click', () => replayMaths(false));
+  $('videoMaths').addEventListener('click', () => replayMaths(true));
+  $('shareVideo').addEventListener('click', async () => { if (!lastVideo) return; try { await navigator.share({ files: [lastVideo], title: 'Spood stack: the maths' }); } catch (e) { /* cancelled */ } });
+  window.__mathsForTest = { replay: r => replayMaths(r) };
 
   // ---------- retouch ----------
   window.__rtFramesForTest = () => rtFrames;          // read by tests/retouch_effect.py
