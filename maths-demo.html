@@ -89,11 +89,11 @@ button.primary { background: var(--accent); color: #062523; border-color: transp
     for (const e of events) { if (e.kind === 'peek') view.peek(e.name, dec(e.d)); else if (e.kind === 'progress' && e.p < 1) view.progress(e.p, e.s); else if (e.kind === 'log') view.log(e.m); }
     const st = view.state, k = +qs.get('scene'); st.scene = st.auto = k; st.freeze = true; st.sceneAt = st.autoAt = performance.now() - (+qs.get('t') || 3000);
     for (let j = 0; j <= k; j++) st.shown.add(j);
-    if (k < 7) { st.stage = view.scenes[k].stage[0]; }
+    if (k < view.scenes.length - 1) { st.stage = view.scenes[k].stage[0]; }
     if (qs.has('nofinal')) st.strips = st.strips.filter(s => !s.rgba);
     view.start(); $('status').textContent = 'scene ' + k; setTimeout(() => { document.body.dataset.ready = '1'; }, +qs.get('run') || 0);
     const tt = view.scenes[k];
-    $('mTitle').textContent = tt.title; $('mEq').innerHTML = tt.eq; $('mCap').textContent = tt.cap;
+    $('mTitle').textContent = tt.title; $('mEq').innerHTML = typeof tt.eq === 'function' ? tt.eq(view.state) : tt.eq; $('mCap').textContent = tt.cap;
     return;
   }
   play();

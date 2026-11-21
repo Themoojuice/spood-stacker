@@ -188,7 +188,7 @@
     const byHelpers = pool && frames.every(f => f.file);
     const rres = await runTasks(cv, byHelpers ? pool : null, 'read', rjobs, (k, r, i) => {
       progress(at('read', k / n), 'Reading photos');
-      if (peek && r && r.thumb) { peek('photo', { i, n, W, H, thumb: r.thumb, focus: r.focusThumb, centreFocus: r.centreFocus }); r.thumb = r.focusThumb = null; }
+      if (peek && r && r.thumb) { peek('photo', { i, n, W, H, thumb: r.thumb, focus: r.focusThumb, centreFocus: r.centreFocus, loupe: r.loupe || [], taken: frames[i].taken == null ? null : frames[i].taken }); r.thumb = r.focusThumb = r.loupe = null; }
     }, () => {},
       async (a, i) => { if (!byHelpers && !a.file) { const f = frames[i]; a.data = f.read ? await f.read() : f.data; f.data = null; } });
     rres.forEach((r, i) => {
@@ -232,8 +232,10 @@
     if (opts.tame) for (const g of gray) { const c = new cv.CLAHE(2.0, new cv.Size(8, 8)); c.apply(g, g); c.delete(); }
     const gd = gray.map(g => ({ data: new Uint8Array(g.data), rows: g.rows, cols: g.cols }));
     gray.forEach(g => g.delete());
-    const fts = await each('features', gd.map(g => ({ g, mask: maskP, pre })), k => progress(at('align', 0.2 * k / n), 'Lining up photos'));
-    if (peek) peek('features', { pts: fts.map((f, i) => peekPoints(f.pts, gd[i].cols, gd[i].rows, 400)), counts: fts.map(f => f.n) });
+    const fts = await each('features', gd.map(g => ({ g, mask: maskP, pre, peek: !!peek })), k => progress(at('align', 0.2 * k / n), 'Lining up photos'));
+    if (peek) peek('features', { pts: fts.map((f, i) => peekPoints(f.pts, gd[i].cols, gd[i].rows, 400)), counts: fts.map(f => f.n),
+      kp: fts.map((f, i) => peekKeys(f, gd[i].cols, gd[i].rows, 400)) });
+    for (const f of fts) { delete f.sz; delete f.ang; delete f.resp; }
     const chainArgs = [-1, 1].map(dir => ({ dir, order, ref, refPos, grays: gd, feats: fts, mask: maskP, repeating, big, pre, peek: !!peek }));
     const lens = [refPos, n - 1 - refPos], part = [0, 0];
     const cres = await each('chain', chainArgs, () => {}, (c, f) => { part[c] = f * lens[c]; progress(at('align', 0.2 + 0.8 * (part[0] + part[1]) / Math.max(1, n - 1)), 'Lining up photos'); });
@@ -876,7 +878,7 @@
 
   /** AKAZE features of one photo on a downscaled copy, found once and reused for
       every pair the photo is matched in. */
-  function features(cv, cache, i, g, m, pre) {
+  function features(cv, cache, i, g, m, pre, extra = false) {
     if (cache && cache.has(i)) return cache.get(i);
     // g arrives already at the feature scale `pre` (same resize as before, done at load)
     const s = pre;
@@ -887,8 +889,12 @@
     ak.detectAndCompute(u, mm, kv, d);
     const pts = new Float32Array(kv.size() * 2);
     for (let k = 0; k < kv.size(); k++) { const p = kv.get(k).pt; pts[2 * k] = p.x; pts[2 * k + 1] = p.y; }
-    kv.delete(); ak.delete(); u.delete(); mm.delete();
     const f = { s, pts, d, n: pts.length / 2 };
+    if (extra) {                                         // "watch the maths": each landmark's size, angle, strength
+      const K = kv.size(); f.sz = new Float32Array(K); f.ang = new Float32Array(K); f.resp = new Float32Array(K);
+      for (let k = 0; k < K; k++) { const q = kv.get(k); f.sz[k] = q.size; f.ang[k] = q.angle; f.resp[k] = q.response; }
+    }
+    kv.delete(); ak.delete(); u.delete(); mm.delete();
     if (cache) cache.set(i, f);
     return f;
   }
@@ -902,6 +908,7 @@
       const bf = new cv.BFMatcher(cv.NORM_HAMMING, false); const mv = new cv.DMatchVectorVector();
       bf.knnMatch(d1, d2, mv, 2);
       const p1 = [], p2 = [], w1 = [], w2 = [];       // w: looser ratio test, for the rough fallback
+      const mi = [];                                  // per p1 pair: query, train, best and runner-up distance
       for (let i = 0; i < mv.size(); i++) {
         const m = mv.get(i);
         if (m.size() < 2) { m.delete(); continue; }
@@ -911,6 +918,7 @@
         }
         if (x.distance < 0.8 * y.distance) {
           p1.push(F1.pts[2 * x.queryIdx], F1.pts[2 * x.queryIdx + 1]); p2.push(F2.pts[2 * x.trainIdx], F2.pts[2 * x.trainIdx + 1]);
+          mi.push(x.queryIdx, x.trainIdx, x.distance, y.distance);
         }
         m.delete();
       }
@@ -922,9 +930,9 @@
           const Hm = cv.findHomography(P1, P2, cv.RANSAC, thr, inl, 5000, 0.999);
           let out = null;
           if (Hm && !Hm.empty()) {
-            const src = [], dst = [], osrc = [], odst = [], I = inl.data;
-            for (let i = 0; i < I.length; i++) if (I[i]) { src.push(q1[2 * i], q1[2 * i + 1]); dst.push(q2[2 * i], q2[2 * i + 1]); } else { osrc.push(q1[2 * i], q1[2 * i + 1]); odst.push(q2[2 * i], q2[2 * i + 1]); }
-            out = { h: Array.from(Hm.data64F), inliers: src.length / 2, src, dst, osrc, odst };
+            const src = [], dst = [], osrc = [], odst = [], I = inl.data, idx = [];
+            for (let i = 0; i < I.length; i++) if (I[i]) { src.push(q1[2 * i], q1[2 * i + 1]); dst.push(q2[2 * i], q2[2 * i + 1]); idx.push(i); } else { osrc.push(q1[2 * i], q1[2 * i + 1]); odst.push(q2[2 * i], q2[2 * i + 1]); }
+            out = { h: Array.from(Hm.data64F), inliers: src.length / 2, src, dst, osrc, odst, idx, strict: q1 === p1 };
           }
           if (Hm) Hm.delete(); inl.delete(); P1.delete(); P2.delete();
           return out;
@@ -953,7 +961,14 @@
           // rescale: H_full = S^-1 H S
           const S = [s, 0, 0, 0, s, 0, 0, 0, 1], Si = [1 / s, 0, 0, 0, 1 / s, 0, 0, 0, 1];
           res = { H: mul3(mul3(Si, best.h), S), inliers: best.inliers, src: best.src.map(v => v / s), dst: best.dst.map(v => v / s), rough,
-            cand: p1.length / 2, osrc: (best.osrc || []).map(v => v / s), odst: (best.odst || []).map(v => v / s) };
+            cand: p1.length / 2, osrc: (best.osrc || []).map(v => v / s), odst: (best.odst || []).map(v => v / s), thr: (3.0 * s + 0.5) / s };
+          if (best.strict && best.idx && best.idx.length) {
+            // a typical agreeing pair (median distance), with both fingerprints, for the view
+            const k = best.idx.slice().sort((a, b) => mi[4 * a + 2] - mi[4 * b + 2])[best.idx.length >> 1];
+            const qi = mi[4 * k], ti = mi[4 * k + 1], c1 = d1.cols, c2 = d2.cols;
+            res.fp = { a: d1.data.slice(qi * c1, (qi + 1) * c1), b: d2.data.slice(ti * c2, (ti + 1) * c2), d1: mi[4 * k + 2], d2: mi[4 * k + 3],
+              pa: [p1[2 * k] / s, p1[2 * k + 1] / s], pb: [p2[2 * k] / s, p2[2 * k + 1] / s] };
+          }
         }
       }
     }
@@ -1921,6 +1936,35 @@
     for (let j = 0; j < m; j += st) o.push(pts[2 * j] / cols, pts[2 * j + 1] / rows);
     return Float32Array.from(o);
   }
+  /** landmark sizes and angles for the same subsample as peekPoints, and the strongest landmark's
+      fingerprint (its binary descriptor) */
+  function peekKeys(f, cols, rows, k) {
+    if (!f.sz) return null;
+    const m = f.n, st = Math.max(1, Math.ceil(m / k)), sz = [], ang = [];
+    for (let j = 0; j < m; j += st) { sz.push(f.sz[j] / cols); ang.push(f.ang[j]); }
+    let best = 0; for (let j = 1; j < m; j++) if (f.resp[j] > f.resp[best]) best = j;
+    return { sz: Float32Array.from(sz), ang: Float32Array.from(ang),
+      top: m ? { x: f.pts[2 * best] / cols, y: f.pts[2 * best + 1] / rows, sz: f.sz[best] / cols, ang: f.ang[best], fp: f.d.slice(best * f.dcols, (best + 1) * f.dcols) } : null };
+  }
+  /** up to three 80 px crops of the full-size photo c3 where its thumbnail t is sharpest (a
+      squared-Laplacian peak, spaced apart), for the view's loupe */
+  function peekLoupe(cv, c3, t) {
+    const gy = new cv.Mat(); cv.cvtColor(t, gy, cv.COLOR_RGB2GRAY); const gf = f32(cv, gy); gy.delete();
+    const fm = focusMeasure(cv, gf, 1.5); gf.delete();
+    const F = Float32Array.from(fm.data32F), w = fm.cols, h = fm.rows; fm.delete();
+    const out = [], S = 80, sep = 0.18 * Math.max(w, h), edge = Math.ceil(S / 2 * w / c3.cols) + 2;
+    for (let k = 0; k < 3; k++) {
+      let bi = -1, bv = 0;
+      for (let y = edge; y < h - edge; y++) for (let x = edge; x < w - edge; x++) { const v = F[y * w + x]; if (v > bv && !out.some(o => Math.hypot(o.tx - x, o.ty - y) < sep)) { bv = v; bi = y * w + x; } }
+      if (bi < 0) break;
+      const tx = bi % w, ty = (bi / w) | 0, cx = Math.round((tx + 0.5) * c3.cols / w), cy = Math.round((ty + 0.5) * c3.rows / h);
+      const x0 = Math.max(0, Math.min(c3.cols - S, cx - S / 2)), y0 = Math.max(0, Math.min(c3.rows - S, cy - S / 2));
+      const roi = c3.roi(new cv.Rect(x0, y0, S, S)), c = roi.clone(); roi.delete();
+      out.push({ tx, ty, x: (x0 + S / 2) / c3.cols, y: (y0 + S / 2) / c3.rows, w: S / c3.cols, h: S / c3.rows, size: S, data: new Uint8Array(c.data) }); c.delete();
+    }
+    out.forEach(o => { delete o.tx; delete o.ty; });
+    return out;
+  }
   /** an 8-bit image (ch channels) shrunk by averaging to at most maxSide across */
   function peekThumb(u8, w, h, ch, maxSide) {
     const f = Math.max(1, Math.ceil(Math.max(w, h) / maxSide)), tw = Math.max(1, Math.floor(w / f)), th = Math.max(1, Math.floor(h / f));
@@ -2013,7 +2057,8 @@
       if (a.peek) {                                        // "watch the maths": a small colour copy
         const tw = Math.max(8, Math.round(W * Math.min(1, 256 / Math.max(W, H)))), th = Math.max(8, Math.round(H * tw / W));
         const t = new cv.Mat(); cv.resize(c3, t, new cv.Size(tw, th), 0, 0, cv.INTER_AREA);
-        res.thumb = { w: tw, h: th, data: new Uint8Array(t.data) }; t.delete();
+        res.thumb = { w: tw, h: th, data: new Uint8Array(t.data) };
+        res.loupe = peekLoupe(cv, c3, t); t.delete();
       }
       parkRows(a.dst, 0, c3); c3.delete();                 // the photo waits outside the WASM heap
       // sharpness in the centre (a float copy of just that part, with a margin so the blur sees
@@ -2039,8 +2084,9 @@
     /** one photo's features (AKAZE, on its <= 1600 px grey) */
     features(cv, a) {
       const g = cv.matFromArray(a.g.rows, a.g.cols, cv.CV_8U, a.g.data), m = unpark(cv, a.mask);
-      const f = features(cv, null, 0, g, m, a.pre); g.delete(); m.delete();
+      const f = features(cv, null, 0, g, m, a.pre, !!a.peek); g.delete(); m.delete();
       const out = { s: f.s, pts: f.pts, n: f.n, drows: f.d.rows, dcols: f.d.cols, d: new Uint8Array(f.d.data) };
+      if (f.sz) { out.sz = f.sz; out.ang = f.ang; out.resp = f.resp; }
       f.d.delete();
       return out;
     },
@@ -2069,7 +2115,8 @@
         if (a.peek) {
           const pick = (A, B, k) => { const m = A.length / 2, st = Math.max(1, Math.ceil(m / k)), o = [[], []]; for (let j = 0; j < m; j += st) { o[0].push(A[2 * j], A[2 * j + 1]); o[1].push(B[2 * j], B[2 * j + 1]); } return o; };
           const [isrc, idst] = pick(h.src || [], h.dst || [], 160), [osrc, odst] = pick(h.osrc || [], h.odst || [], 60);
-          peeks.push({ cur, against, inliers: best, cand: h.cand || best, rough: !!h.rough, isrc, idst, osrc, odst, Hfeat: Hm.slice(), Hmat: r.H.slice(), ecc: r.skipped ? 'skipped' : r.ok ? 'ok' : 'failed' });
+          peeks.push({ cur, against, inliers: best, cand: h.cand || best, rough: !!h.rough, isrc, idst, osrc, odst, Hfeat: Hm.slice(), Hmat: r.H.slice(), ecc: r.skipped ? 'skipped' : r.ok ? 'ok' : 'failed',
+            fp: h.fp || null, thr: h.thr || 3 });
         }
         if (h.rough && r.ok) logs.push(`photo ${cur + 1}: framed well apart from the others; lined up by its overall shape first`);
         Hs.set(cur, r.H); done.push([cur, r.H, best, r.ok || !!r.skipped, !!h.rough]);
