@@ -391,6 +391,8 @@
     let idx = [...Array(n).keys()].filter(i => keep[i]);
     // (d) photos that add no sharp detail the others don't already have
     if (peek) peek('winners', peekWinners(idx, sres, n, keep, why, order, W, H, qs));
+    const sharp = peek ? sharpArea(idx, sres) : null;
+    if (sharp) peek('sharp', sharp);
     const share = winnerShare(idx.map(i => sres[i].wf));
     sres.length = 0;
     if (idx.length > 2) idx.forEach((i, k) => {
@@ -407,7 +409,8 @@
     const seen = unpark(cv, wmask[idx[0]]);
     for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
     const box = largestRect(cv, seen); seen.delete();
-    if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1), left: left.map(i => ({ i, why: why[i] })) });
+    if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1), left: left.map(i => ({ i, why: why[i] })),
+      best: sharp && warped[sharp.best] ? { i: sharp.best, img: peekCrop(cv, warped[sharp.best], box, W, Math.min(720, box.w)) } : null });
 
     // ---------- 5b. hand the lined-up photos to the retouch brush ----------
     // Each is cropped and finished exactly like the stack, so painted pixels match.
@@ -456,7 +459,7 @@
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
     out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
     rgba.delete();
-    if (peek) { const sw = Math.min(360, W); peek('strip', { W, H, y0: box.y, y1: box.y + box.h, x0: box.x, w: box.w, rgba: true, data: peekRows(out.data, out.width, 0, out.height, 4, sw * out.width / W) }); }
+    if (peek) { const sw = Math.min(720, W); peek('strip', { W, H, y0: box.y, y1: box.y + box.h, x0: box.x, w: box.w, rgba: true, data: peekRows(out.data, out.width, 0, out.height, 4, sw * out.width / W) }); }
     }
     unparkAll(warped); unparkAll(wmask); unparkAll(wg);
     trash.forEach(m => free(m));
@@ -1922,7 +1925,7 @@
       while (placed < spans.length && sres[placed]) place(placed++, sres[placed - 1]);
       if (peek && placed) {                               // the rows that are final now, shrunk
         const upTo = placed === spans.length ? H : spans[placed - 1].y1 - CF;
-        if (upTo > shown) { peek('strip', { W, H, y0: shown, y1: upTo, data: peekRows(out, W, shown, upTo, 3, Math.min(360, W)) }); shown = upTo; }
+        if (upTo > shown) { peek('strip', { W, H, y0: shown, y1: upTo, data: peekRows(out, W, shown, upTo, 3, Math.min(720, W)) }); shown = upTo; }
       }
     }, (s, f) => { partial[s] = Math.min(0.99, f); show(); }, false);
     progress(1);
@@ -2013,6 +2016,38 @@
   }
   /** which photo is sharpest where (the photos' focus times what each may contribute, quarter
       size), shrunk to about 240 px: per cell, the photo with the strongest focus in it */
+  /** how much of the frame is sharp: in the stack (the sharpest photo at each spot) and in each
+      single photo, from the focus energy the choice of photos uses (focus x usable, quarter size).
+      Sharp = within a factor 10 of the frame's sharpest spots (the 99.5th percentile). */
+  function sharpArea(idx, sres) {
+    const fs = idx.map(i => sres[i].wf), N = fs[0].length, mx = new Float32Array(N);
+    for (const f of fs) for (let k = 0; k < N; k++) if (f[k] > mx[k]) mx[k] = f[k];
+    const srt = Float32Array.from(mx).sort(), tau = 0.1 * srt[Math.min(N - 1, Math.floor(N * 0.995))];
+    if (!(tau > 0)) return null;
+    let st = 0; for (let k = 0; k < N; k++) if (mx[k] >= tau) st++;
+    const per = fs.map(f => { let c = 0; for (let k = 0; k < N; k++) if (f[k] >= tau) c++; return c / N; });
+    const b = per.indexOf(Math.max(...per));
+    return { stack: st / N, per: per.slice(), photos: idx.slice(), best: idx[b], bestShare: per[b] };
+  }
+  /** the box of a parked full-size RGB photo, shrunk to outW across, read a band of rows at a time */
+  function peekCrop(cv, p, box, W, outW) {
+    const f = box.w / outW, ow = Math.max(1, Math.round(outW)), oh = Math.max(1, Math.round(box.h / f)), out = new Uint8Array(ow * oh * 3), st = Math.max(1, Math.floor(f / 3));
+    for (let y0 = 0; y0 < oh; y0 += 64) {
+      const y1 = Math.min(oh, y0 + 64), r0 = box.y + Math.floor(y0 * f), r1 = Math.min(box.y + box.h, box.y + Math.ceil(y1 * f) + 1);
+      const m = unpark(cv, p, r0, r1), D = m.data;
+      for (let y = y0; y < y1; y++) {
+        const sy0 = Math.min(r1 - r0 - 1, box.y + Math.floor(y * f) - r0), sy1 = Math.max(sy0 + 1, Math.min(r1 - r0, box.y + Math.floor((y + 1) * f) - r0));
+        for (let x = 0; x < ow; x++) {
+          const sx0 = box.x + Math.floor(x * f), sx1 = Math.max(sx0 + 1, Math.min(box.x + box.w, box.x + Math.floor((x + 1) * f)));
+          let r = 0, g = 0, b = 0, c = 0;
+          for (let yy = sy0; yy < sy1; yy += st) for (let xx = sx0; xx < sx1; xx += st) { const q = (yy * W + xx) * 3; r += D[q]; g += D[q + 1]; b += D[q + 2]; c++; }
+          const o = (y * ow + x) * 3; out[o] = r / c; out[o + 1] = g / c; out[o + 2] = b / c;
+        }
+      }
+      m.delete();
+    }
+    return { w: ow, h: oh, data: out };
+  }
   function peekWinners(idx, sres, n, keep, why, order, W, H, qs) {
     const fs = idx.map(i => sres[i].wf), N = fs[0].length;
     let w = Math.round(W * qs), h = Math.round(H * qs);
