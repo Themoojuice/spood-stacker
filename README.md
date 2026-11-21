@@ -36,7 +36,14 @@ After stacking, tap **Retouch** to fix halos around legs and setae by hand, the 
 - **Done** saves a `-retouched.jpg` beside the original, with the same EXIF.
 
 ### Watch the maths
-While it stacks, the app animates what the engine is actually doing, from the engine's own working data (`maths.js`, fed by `opts.onPeek` in `engine.js`): each photo's focus map, the focus order (the photos' similarity grid and its Fiedler vector), the AKAZE landmarks, the RANSAC matches and the homography they agree on, every line-up drawn on the reference with your hand's path through the burst, the optical flow, the per-pixel vote for the sharpest photo (coloured by focus order, a rough depth map) and the merged strips as they land. Each scene has its equation and a line on what it means. **Hide the maths** puts the old progress screen back (remembered). The previews are small and read-only: the stack is identical with them on or off, and they cost about 2% of the time (measured in headless Chromium).
+While it stacks, the app animates what the engine is actually doing, from the engine's own working data (`maths.js`, fed by `opts.onPeek` in `engine.js`): each photo's focus map, the focus order (the photos' similarity grid and its Fiedler vector), the AKAZE landmarks, the RANSAC matches and the homography they agree on, every line-up drawn on the reference with your hand's path through the burst, the optical flow, the per-pixel vote for the sharpest photo (coloured by focus order, a rough depth map) and the merged strips as they land. Each scene has its title and equation in the picture; **What's this?** under it explains it.
+
+- **Paced to your stack:** each scene gets a share of the time the stack still needs, so a short stack shows every scene briskly and a long one lingers.
+- **Your photos move as one set** between scenes: filmstrip, focus line, the deck that collapses onto the reference, the legend of the vote.
+- **Tap** the picture to hold a scene (the stack carries on), **swipe right** to look back at an earlier one, left to come forward again, and tap a photo in the first scene's filmstrip to see its focus map. With the phone's reduce-motion setting it cuts and fades instead of gliding.
+- **Hide the maths** puts the old progress screen back (remembered).
+
+The previews are small and read-only: the stack is identical with them on or off. On the 2-core test machine, with software drawing, the view costs about 3–7% of the stack's time (it draws at 30 frames a second only while something moves, 12 otherwise).
 
 ### Switching apps while it stacks (experimental)
 Android closes a browser page that's been off screen for a while. Two things may keep a stack going:
