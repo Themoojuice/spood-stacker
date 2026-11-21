@@ -93,26 +93,71 @@
     g.restore(); return cx - x;
   }
 
+  /** a full-resolution crop for the loupe: picture, brightness, and its Laplacian (4 neighbours
+      minus 4 x itself) worked out here on the real pixels, with a glow for where it is strong */
+  function loupeOf(o) {
+    const S = o.size, c = toCanvas(S, S, o.data, 3), grey = new Float32Array(S * S), lap = new Float32Array(S * S);
+    for (let i = 0; i < S * S; i++) grey[i] = 0.299 * o.data[3 * i] + 0.587 * o.data[3 * i + 1] + 0.114 * o.data[3 * i + 2];
+    for (let y = 1; y < S - 1; y++) for (let x = 1; x < S - 1; x++) { const i = y * S + x; lap[i] = grey[i - 1] + grey[i + 1] + grey[i - S] + grey[i + S] - 4 * grey[i]; }
+    const mags = Float32Array.from(lap, Math.abs).sort(), hi = mags[Math.floor(mags.length * 0.97)] || 1;
+    const glow = toCanvas(S, S, o.data, 3, (i, D, q) => { const v = clamp01(Math.abs(lap[i]) / hi), k = Math.round(v * 255) * 3; D[q] = MAGMA[k]; D[q + 1] = MAGMA[k + 1]; D[q + 2] = MAGMA[k + 2]; D[q + 3] = Math.round(255 * clamp01(v * 1.4)); });
+    let kRow = 38, best = -1;                          // the busiest 3 rows in the middle 20 x 20, for the kernel's walk
+    for (let y = 31; y <= 47; y++) { let sum = 0; for (let r = y; r < y + 2; r++) for (let x = 33; x < 47; x++) sum += Math.abs(lap[r * S + x]); if (sum > best) { best = sum; kRow = y; } }
+    return { x: o.x, y: o.y, w: o.w, h: o.h, size: S, canvas: c, grey, lap, glow, kRow };
+  }
+  /** a binary fingerprint as a grid of bits (a byte per column, 8 rows), the first `upto` lit;
+      `other` marks the bits that differ from another fingerprint */
+  function drawBits(g, bytes, x, y, cell, upto = 1e9, other = null, flash = 0, color = 'rgba(79,194,185,.95)') {
+    const n = bytes.length;
+    for (let b = 0; b < n; b++) for (let k = 0; k < 8; k++) {
+      const idx = b * 8 + k; if (idx >= upto) return;
+      const on = (bytes[b] >> (7 - k)) & 1, diff = other && (((bytes[b] ^ other[b]) >> (7 - k)) & 1);
+      g.fillStyle = diff && flash > 0 ? `rgba(255,93,143,${0.35 + 0.65 * flash})` : on ? color : 'rgba(143,163,154,.16)';
+      g.fillRect(x + b * cell, y + k * cell, Math.max(1, cell - 0.6), Math.max(1, cell - 0.6));
+    }
+  }
+  const popXor = (a, b) => { let c = 0; for (let i = 0; i < a.length; i++) { let v = a[i] ^ b[i]; while (v) { c += v & 1; v >>= 1; } } return c; };
+  /** the homography through 4 point pairs (direct linear solve, h33 = 1), or null if degenerate */
+  function homog4(src, dst) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [u, v] = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    for (let c = 0; c < 8; c++) {                       // Gaussian elimination, partial pivoting
+      let p = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+      if (Math.abs(A[p][c]) < 1e-9) return null;
+      [A[c], A[p]] = [A[p], A[c]]; [b[c], b[p]] = [b[p], b[c]];
+      for (let r = 0; r < 8; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k]; b[r] -= f * b[c]; }
+    }
+    return [...b.map((v, i) => v / A[i][i]), 1];
+  }
+
   // ---------- the scenes, in the engine's order ----------
   // stage: the engine stage names that belong to the scene; nominal: how long it wants (ms) on a
   // stack of ordinary length; weight: its share of the time left
   const SCENES = [
-    { id: 'read', stage: ['Reading photos'], nominal: 5000, weight: 1,
+    { id: 'burst', stage: ['Reading photos'], nominal: 5000, weight: 0.7,
+      title: 'Your burst, as you took it',
+      eq: S => { const t = burstSpan(S); return `${S.photos.filter(Boolean).length || S.n} photos` + (t ? ` &nbsp;·&nbsp; Δt = ${t.toFixed(1)} s` : '') + ' &nbsp;·&nbsp; one plane of focus each'; },
+      cap: 'Each photo is sharp in one thin slice of depth. Flicking through them in the order you took them shows that slice sweeping through the spider as you leaned in. The stacker\'s job is to keep each slice\'s sharp part.' },
+    { id: 'read', stage: ['Reading photos'], nominal: 7500, weight: 1.1,
       title: 'Where is each photo sharp?',
       eq: 'F = G<sub>σ</sub> ∗ (∇²I)²',
-      cap: 'The Laplacian ∇²I measures how sharply brightness bends from pixel to pixel. Squared and smoothed, it glows wherever a photo is in focus: the stacker\'s sense of sharpness.' },
+      cap: 'The Laplacian ∇²I measures how sharply brightness bends from pixel to pixel: each pixel\'s four neighbours minus four times itself. The loupe shows your photo at full resolution, then single pixels, with that 3 × 3 sum sliding across them. Squared and smoothed, it glows wherever a photo is in focus. The curve is each photo\'s sharpness in the centre, in the order taken.' },
     { id: 'order', stage: ['Working out focus order'], nominal: 6500, weight: 0.9,
       title: 'Sorting the photos by depth of focus',
       eq: 'C<sub>ij</sub> = corr(log F<sub>i</sub>, log F<sub>j</sub>) &nbsp;·&nbsp; (D − C) v₂ = λ₂ v₂',
       cap: 'Each pair of photos is scored by how alike their sharp regions are (the grid). The second eigenvector of the graph Laplacian D − C, the Fiedler vector, lines them up from one end of the depth to the other. The photo sharpest in the centre becomes the reference.' },
-    { id: 'features', stage: ['Lining up photos'], nominal: 6000, weight: 1,
+    { id: 'features', stage: ['Lining up photos'], nominal: 7500, weight: 1.1,
       title: 'Finding landmarks (AKAZE)',
       eq: '∂<sub>t</sub>L = div(g(|∇L<sub>σ</sub>|) ∇L) &nbsp;·&nbsp; det ℋ = L<sub>xx</sub>L<sub>yy</sub> − L<sub>xy</sub>²',
-      cap: 'Each photo is blurred by a diffusion that stops at edges, so outlines stay crisp at every scale. Where the Hessian determinant peaks (corners and blobs) a landmark is kept, with a binary fingerprint of its surroundings.' },
-    { id: 'match', stage: ['Lining up photos'], nominal: 8000, weight: 1.3,
+      cap: 'Each photo is blurred by a diffusion that stops at edges, so outlines stay crisp at every scale. Where the Hessian determinant peaks (corners and blobs) a landmark is kept: the circle is its size, the tick its direction. Its fingerprint is 486 yes/no comparisons of the blurred brightness and slope around it.' },
+    { id: 'match', stage: ['Lining up photos'], nominal: 10500, weight: 1.5,
       title: 'Matching, then outvoting the liars',
       eq: 'x′ ≃ H x, &nbsp; H ∈ ℝ<sup>3×3</sup> (RANSAC)',
-      cap: 'Landmarks pair up with their closest fingerprint. RANSAC fits the homography H to 4 random pairs thousands of times and keeps the fit most pairs agree with; the magenta pairs were outvoted.' },
+      cap: 'Landmarks pair up with their closest fingerprint: the fewest differing bits (Hamming distance), and clearly closer than the runner-up. RANSAC then fits the homography H to 4 random pairs, counts how many other pairs agree, and repeats thousands of times, keeping the best; the rounds shown are re-run here on the real pairs. The magenta pairs were outvoted.' },
     { id: 'aligned', stage: ['Lining up photos', 'Correcting movement'], nominal: 6500, weight: 1,
       title: 'Fine-tuning every line-up (ECC)',
       eq: 'max<sub>H</sub> ρ = ⟨î<sub>ref</sub>, î<sub>H</sub>⟩ / ‖î<sub>ref</sub>‖ ‖î<sub>H</sub>‖',
@@ -132,6 +177,10 @@
   ];
   const STAGE_RANK = ['Reading photos', 'Working out focus order', 'Lining up photos', 'Correcting movement', 'Choosing photos', 'Keeping photos for retouching', 'Merging', 'Done'];
   const MERGE = SCENES.length - 1;
+  const NOM = id => SCENES.find(s => s.id === id).nominal;
+  /** seconds from the first to the last photo of the burst, from the cameras' time stamps */
+  function burstSpan(S) { const t = S.photos.filter(p => p && p.taken != null).map(p => p.taken); return t.length > 1 ? (Math.max(...t) - Math.min(...t)) / 1000 : null; }
+  const eqOf = (sc, S) => typeof sc.eq === 'function' ? sc.eq(S) : sc.eq;
   const HUD_TOP = 72, HUD_BOTTOM = 34;                 // the glass strips over the picture
 
   // frame rate and pixel density (localStorage 'spood-maths-tune' = '{"fps":20,"dpr":1.5}' for tests)
@@ -166,7 +215,8 @@
           D[q] = D[q] * 0.32 * (1 - a) + MAGMA[k] * a; D[q + 1] = D[q + 1] * 0.32 * (1 - a) + MAGMA[k + 1] * a; D[q + 2] = D[q + 2] * 0.32 * (1 - a) + MAGMA[k + 2] * a;
         });
         S.n = Math.max(S.n, d.n || 0);
-        S.photos[d.i] = { thumb, heat, w: t.w, h: t.h, W: d.W, H: d.H, cf: d.centreFocus, at: performance.now() };
+        S.photos[d.i] = { thumb, heat, w: t.w, h: t.h, W: d.W, H: d.H, cf: d.centreFocus, at: performance.now(), taken: d.taken,
+          loupe: (d.loupe || []).map(o => loupeOf(o)) };
         S.lastPhoto = d.i; S.lastPhotoAt = performance.now();
       } else if (name === 'order') S.order = d;
       else if (name === 'features') S.feats = d;
@@ -202,6 +252,7 @@
 
     // ---------- pacing: which scene, for how long ----------
     const has = {
+      burst: () => S.photos.some(Boolean),
       read: () => S.photos.some(Boolean), order: () => !!S.order, features: () => !!S.feats, match: () => S.matches.length > 0,
       aligned: () => !!S.aligned, flow: () => S.flows.length > 0, winners: () => !!S.winners, merge: () => !!S.box || S.strips.length > 0
     };
@@ -250,7 +301,7 @@
     function setText() {
       const sc = SCENES[S ? S.scene : 0];
       if (ui.title) ui.title.textContent = sc.title;
-      if (ui.eq) ui.eq.innerHTML = sc.eq;
+      if (ui.eq) ui.eq.innerHTML = eqOf(sc, S || { photos: [], n: 0 });
       if (ui.cap) ui.cap.textContent = sc.cap;
     }
     let liveText = '';
@@ -271,10 +322,10 @@
 
     // ---------- sprites: one per photo, gliding between the places scenes give them ----------
     function sprite(i) {
-      return S.spr[i] || (S.spr[i] = { x: 0, y: 0, w: 0, h: 0, a: 0, look: 0, z: 0, t: null, fresh: true });
+      return S.spr[i] || (S.spr[i] = { x: 0, y: 0, w: 0, h: 0, a: 0, look: 0, z: 0, rot: 0, t: null, fresh: true });
     }
     /** scene layouts call this: where photo i should be (rect in picture coordinates) */
-    function place(i, r, o = {}) { const s = sprite(i); s.t = { x: r.x, y: r.y, w: r.w, h: r.h, a: o.a == null ? 1 : o.a, look: o.look || 0, z: o.z || 0 }; }
+    function place(i, r, o = {}) { const s = sprite(i); s.edge = !!o.edge; s.t = { x: r.x, y: r.y, w: r.w, h: r.h, a: o.a == null ? 1 : o.a, look: o.look || 0, z: o.z || 0, rot: o.rot || 0, from: o.from || null }; }
     /** a row of photos (in the given order) at y, h tall; returns their rects by photo index */
     function strip(ids, y, h, x0 = null, w0 = null, gap = 3) {
       const A = area(), x = x0 == null ? A.x : x0, w = w0 == null ? A.w : w0, n = Math.max(1, ids.length);
@@ -288,10 +339,10 @@
       for (const s of S.spr) {
         if (!s || !s.t) continue;
         if (Math.abs(s.x - s.t.x) + Math.abs(s.y - s.t.y) + Math.abs(s.w - s.t.w) > 0.6 || Math.abs(s.a - s.t.a) > 0.01) busy(60);
-        if (s.fresh) { Object.assign(s, s.t, { a: 0 }); s.fresh = false; }   // a new photo fades in where it belongs
+        if (s.fresh) { Object.assign(s, s.t, s.t.from || {}, { a: 0 }); s.fresh = false; }   // a new photo fades in where it belongs (or flies in from s.t.from)
         else if (s.a < 0.03 && s.t.a > s.a) Object.assign(s, { x: s.t.x, y: s.t.y, w: s.t.w, h: s.t.h });   // an unseen photo doesn't glide: it appears in its new place
         s.x = lerp(s.x, s.t.x, k); s.y = lerp(s.y, s.t.y, k); s.w = lerp(s.w, s.t.w, k); s.h = lerp(s.h, s.t.h, k);
-        s.a = lerp(s.a, s.t.a, ka); s.look = lerp(s.look, s.t.look, ka); s.z = s.t.z;
+        s.a = lerp(s.a, s.t.a, ka); s.look = lerp(s.look, s.t.look, ka); s.z = s.t.z; s.rot = lerp(s.rot || 0, s.t.rot || 0, k);
       }
     }
     function drawSprites() {
@@ -299,8 +350,10 @@
       for (const [s, i] of list) {
         const p = S.photos[i];
         g.save(); g.globalAlpha = s.a;
+        if (Math.abs(s.rot) > 0.002) { g.translate(s.x + s.w / 2, s.y + s.h / 2); g.rotate(s.rot); g.translate(-s.x - s.w / 2, -s.y - s.h / 2); }
         g.drawImage(p.thumb, s.x, s.y, s.w, s.h);
         if (s.look > 0.01) { g.globalAlpha = s.a * s.look; g.drawImage(p.heat, s.x, s.y, s.w, s.h); }
+        if (s.edge) { g.globalAlpha = s.a; g.strokeStyle = 'rgba(230,236,232,.55)'; g.strokeRect(s.x + 0.5, s.y + 0.5, s.w - 1, s.h - 1); }
         g.restore();
       }
     }
@@ -332,6 +385,7 @@
       if (Math.abs(S.cam.z - T.z) > 0.004 || Math.abs(S.cam.x - T.x) + Math.abs(S.cam.y - T.y) > 2) busy(60);
       S.cam.z = lerp(S.cam.z, T.z, k); S.cam.x = lerp(S.cam.x, T.x, k); S.cam.y = lerp(S.cam.y, T.y, k);
     }
+    function toScreen(x, y) { const A = area(), z = S.cam.z; return [A.x + A.w / 2 + z * (x - S.cam.x), A.y + A.h / 2 + z * (y - S.cam.y)]; }
     function camTransform() {
       const A = area(), z = S.cam.z;
       g.setTransform(dpr * z, 0, 0, dpr * z, dpr * (A.x + A.w / 2 - z * S.cam.x), dpr * (A.y + A.h / 2 - z * S.cam.y));
@@ -389,7 +443,7 @@
       }
       let ts = 15; g.font = `700 ${ts}px ${DISPLAY}`; while (ts > 11 && g.measureText(sc.title).width > cssW - 24) { ts -= 0.5; g.font = `700 ${ts}px ${DISPLAY}`; }
       label(g, sc.title, 12, 40, { size: ts, weight: 700, font: DISPLAY, color: C.ink });
-      drawEq(g, sc.eq, 12, 61, cssW - 24, 14);
+      drawEq(g, eqOf(sc, S), 12, 61, cssW - 24, 14);
       // the scene's live numbers, then the engine's last log line
       g.save(); g.beginPath(); g.rect(10, cssH - HUD_BOTTOM, cssW - 20, HUD_BOTTOM); g.clip();
       let ls = 10.5; g.font = `500 ${ls}px ${MONO}`; while (ls > 8.5 && g.measureText(liveText).width > cssW - 24) { ls -= 0.5; g.font = `500 ${ls}px ${MONO}`; }
@@ -405,15 +459,60 @@
 
     // ---------- the scenes ----------
     const SCENE = {
+      burst: {
+        layout(t, now) {
+          const A = area(), ids = S.photos.map((p, i) => p ? i : -1).filter(i => i >= 0);
+          if (!ids.length) return;
+          // capture order: the time stamps if every photo has one, else the order given
+          const order = ids.slice().sort((a, b) => (S.photos[a].taken != null && S.photos[b].taken != null ? S.photos[a].taken - S.photos[b].taken : 0) || a - b);
+          S.burstOrder = order;
+          const n = Math.max(S.n, ids.length), p0 = S.photos[ids[0]], asp = p0.w / p0.h;
+          // the hand of cards: a fan along the bottom, dealt from below as each photo is read
+          const cw = Math.min(A.w * 0.3, A.w / Math.max(3, n * 0.42)), ch = cw / asp, fanY = A.y + A.h - ch - 10;
+          order.forEach((i, k) => {
+            const u = n > 1 ? k / (n - 1) - 0.5 : 0, x = A.x + A.w / 2 + u * (A.w - cw - 8) - cw / 2, y = fanY + Math.abs(u) * 18;
+            place(i, { x, y, w: cw, h: ch }, { rot: u * 0.55, z: k, edge: true, from: { x: A.x + A.w / 2 - cw / 2, y: A.y + A.h + 20, rot: 0 } });
+          });
+          // the flipbook above it, once a few are in: a photo every 150 ms, in the order taken
+          const main = { x: A.x + A.w * 0.08, y: A.y, w: A.w * 0.84, h: fanY - A.y - 34 };
+          S.burstMain = main; S.burstFan = fanY;
+          S.burstCur = t > 900 && order.length > 1 ? order[Math.floor((t - 900) / 150) % order.length] : order[order.length - 1];
+          S.camT = { z: 1, still: true };
+        },
+        draw(t) {
+          const A = area(), order = S.burstOrder;
+          if (!order || !S.photos[S.burstCur]) { label(g, 'opening your burst…', A.x + A.w / 2, A.y + A.h / 2, { align: 'center', color: C.muted }); return; }
+          const i = S.burstCur, p = S.photos[i], r = fit(p.w, p.h, S.burstMain);
+          g.drawImage(p.thumb, r.x, r.y, r.w, r.h);
+          g.strokeStyle = 'rgba(230,236,232,.35)'; g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+          label(g, `photo ${i + 1}`, r.x + 6, r.y + 16, { size: 11, bg: 'rgba(11,17,16,.7)' });
+          // the time line: a tick per photo at its capture time, the one on show lit
+          const span = burstSpan(S), ty = r.y + r.h + 16, x0 = A.x + 20, x1 = A.x + A.w - 20;
+          const ts = order.map(j => S.photos[j].taken), t0 = Math.min(...ts.filter(v => v != null)), have = span && ts.every(v => v != null);
+          g.strokeStyle = C.grid; g.beginPath(); g.moveTo(x0, ty); g.lineTo(x1, ty); g.stroke();
+          order.forEach((j, k) => {
+            const x = have ? lerp(x0, x1, (S.photos[j].taken - t0) / (span * 1000)) : lerp(x0, x1, order.length > 1 ? k / (order.length - 1) : 0.5);
+            g.fillStyle = j === i ? C.amber : C.muted; g.beginPath(); g.arc(x, ty, j === i ? 3.5 : 2, 0, 6.283); g.fill();
+          });
+          if (have) { label(g, '0 s', x0, ty + 14, { size: 9, color: C.muted }); label(g, `${span.toFixed(1)} s`, x1, ty + 14, { size: 9, align: 'right', color: C.muted }); }
+          const got = S.photos.filter(Boolean).length;
+          live(got < S.n ? `reading: ${got} of ${S.n} photos in` : `${got} photos${span ? ` over ${span.toFixed(1)} s` : ''} · flicked through in the order taken`);
+          void t;
+        }
+      },
+
       read: {
         layout(t, now) {
           const A = area(), stripH = Math.min(46, A.h * 0.16), main = { x: A.x, y: A.y, w: A.w, h: A.h - stripH - 12 };
           const arrived = S.photos.map((p, i) => p ? i : -1).filter(i => i >= 0);
           if (!arrived.length) return;
-          // the newest photo for a moment, then a slow tour of all of them (or the one tapped)
-          let cur = S.lastPhoto, since = now - S.lastPhotoAt;
-          if (since > 2600) cur = arrived[Math.floor((since - 2600) / 2600 + arrived.indexOf(S.lastPhoto) + 1) % arrived.length];
-          if (S.pick >= 0 && now - S.pickAt < 5000) cur = S.pick;
+          // a slow tour of the photos (or the one tapped): the glow sweeps down, then the loupe
+          const per = 6200, picked = S.pick >= 0 && now - S.pickAt < per;
+          const k = Math.floor(t / per);                 // chosen once per cycle, so a new arrival can't cut a look short
+          if (k !== S.readCycle || S.readTour == null || !S.photos[S.readTour]) { S.readCycle = k; S.readTour = arrived[k % arrived.length]; }
+          let cur = S.readTour;
+          if (picked) cur = S.pick;
+          S.readLt = picked ? (now - S.pickAt) : t % per;
           if (cur !== S.readCur) { S.readPrev = S.readCur; S.readCur = cur; S.readSwap = now; busy(1900, now); }
           S.readMain = main;
           const slots = strip([...Array(Math.max(S.n, arrived.length)).keys()], A.y + A.h - stripH, stripH);
@@ -429,20 +528,72 @@
           if (S.readPrev != null && S.photos[S.readPrev] && mix < 1) { const q = S.photos[S.readPrev], rq = fit(q.w, q.h, S.readMain); g.save(); g.globalAlpha *= 1 - mix; g.drawImage(q.heat, rq.x, rq.y, rq.w, rq.h); g.restore(); }
           g.save(); g.globalAlpha *= mix; g.drawImage(p.thumb, r.x, r.y, r.w, r.h); g.restore();
           // the focus glow sweeping down the photo on screen
-          const local = now - (S.readSwap || 0);
+          const local = S.readLt;
           const sweep = reduced ? 1 : ease((local - 250) / 1300), yy = r.y + r.h * sweep;
           g.save(); g.globalAlpha *= 0.55 * mix; g.fillStyle = C.bg; g.fillRect(r.x, r.y, r.w, r.h); g.restore();
           g.save(); g.globalAlpha *= mix; g.beginPath(); g.rect(r.x, r.y, r.w, r.h * sweep); g.clip(); g.drawImage(p.heat, r.x, r.y, r.w, r.h); g.restore();
           if (sweep < 1) { g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip(); const gr = g.createLinearGradient(0, yy - 14, 0, yy + 2); gr.addColorStop(0, 'rgba(254,196,136,0)'); gr.addColorStop(1, 'rgba(254,196,136,.85)'); g.fillStyle = gr; g.fillRect(r.x, yy - 14, r.w, 16); g.restore(); }
           label(g, `photo ${cur + 1}`, r.x + 6, r.y + 16, { size: 11, bg: 'rgba(11,17,16,.7)' });
+          if (p.loupe && p.loupe.length) this.loupe(p, r, local, now);
+          this.curve(cur);
           // the one on show is ringed in the filmstrip; empty places are the photos still to come
           g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
           for (const [i, sl] of Object.entries(S.readSlots || {})) {
             if (+i === cur || !S.photos[i]) { g.strokeStyle = +i === cur ? C.amber : C.grid; g.lineWidth = +i === cur ? 1.5 : 1; g.strokeRect(sl.x - 0.5, sl.y - 0.5, sl.w + 1, sl.h + 1); }
           }
           g.restore();
-          const arrived = S.photos.filter(Boolean).length;
-          live(`photo ${arrived} of ${S.n} read · bright = in focus${arrived > 1 ? ' · tap one to look' : ''}`);
+          if (!S.loupeLive) { const arrived = S.photos.filter(Boolean).length; live(`photo ${cur + 1} · bright = in focus${arrived > 1 ? ' · tap a photo below to look' : ''}`); }
+        },
+        /** the loupe: the photo at full resolution where it is sharpest, then single pixels with the
+            Laplacian's 3 x 3 sum sliding across them, leaving its glow behind */
+        loupe(p, r, lt, now) {
+          const L = p.loupe[0], open = reduced ? (lt > 1500 ? 1 : 0) : ease((lt - 1500) / 450) * (1 - ease((lt - 5700) / 400));
+          S.loupeLive = open > 0.05;
+          if (!reduced && ((lt > 1450 && lt < 2900) || (lt > 5650 && lt < 6150))) busy(60, now);   // smooth only while it opens, zooms and closes
+          if (open <= 0.01) return;
+          const sx = r.x + L.x * r.w, sy = r.y + L.y * r.h, spot = Math.max(5, L.w * r.w / 2);
+          const R0 = Math.min(74, r.w * 0.24), cx = clamp(sx + (sx < r.x + r.w / 2 ? 1 : -1) * R0 * 1.25, r.x + R0 + 4, r.x + r.w - R0 - 4), cy = clamp(sy - R0 * 0.55, r.y + R0 + 24, r.y + r.h - R0 - 4);
+          g.save(); g.globalAlpha *= open;
+          g.strokeStyle = C.amber; g.lineWidth = 1.2; g.strokeRect(sx - spot, sy - spot, 2 * spot, 2 * spot);
+          g.beginPath(); g.moveTo(sx, sy); g.lineTo(cx, cy); g.stroke();
+          // inside: the 80 px crop, then zooming to the middle 20 px, where each pixel is a square
+          const zoom = reduced ? (lt > 2600 ? 1 : 0) : ease((lt - 2100) / 700), srcS = lerp(L.size, 20, zoom), o = (L.size - srcS) / 2;
+          g.save(); g.beginPath(); g.arc(cx, cy, R0, 0, 6.283); g.clip();
+          g.imageSmoothingEnabled = zoom < 0.5;
+          g.drawImage(L.canvas, o, o, srcS, srcS, cx - R0, cy - R0, 2 * R0, 2 * R0);
+          // the kernel's walk: three rows across the middle, the glow left behind it
+          const kt = lt - 2900, px = 2 * R0 / srcS, RW = 14, steps = 2 * RW;
+          if (zoom > 0.98 && kt > 0) {
+            const k = Math.min(steps - 1, Math.floor(kt / 2600 * steps)), row = Math.floor(k / RW), col = k % RW;
+            const gx0 = Math.round(o) + 3, gy0 = L.kRow;
+            for (let j = 0; j <= k; j++) {
+              const rr = Math.floor(j / RW), cc = j % RW, gx = gx0 + cc, gy = gy0 + rr;
+              g.drawImage(L.glow, gx, gy, 1, 1, cx - R0 + (gx - o) * px, cy - R0 + (gy - o) * px, px, px);
+            }
+            const kx = gx0 + col, ky = gy0 + row, X = cx - R0 + (kx - o) * px, Y = cy - R0 + (ky - o) * px;
+            g.strokeStyle = C.ink; g.lineWidth = 1.2; g.strokeRect(X - px, Y - px, 3 * px, 3 * px);
+            g.strokeStyle = C.amber; g.strokeRect(X, Y, px, px);
+            const S2 = L.size, i = ky * S2 + kx, nb = L.grey[i - 1] + L.grey[i + 1] + L.grey[i - S2] + L.grey[i + S2];
+            live(`∇²I = ${Math.round(nb)} − 4×${Math.round(L.grey[i])} = ${Math.round(L.lap[i])}  (4 neighbours − 4 × middle)`);
+          }
+          g.restore();
+          g.strokeStyle = C.amber; g.lineWidth = 2; g.beginPath(); g.arc(cx, cy, R0, 0, 6.283); g.stroke(); g.lineWidth = 1;
+          if (zoom > 0.98) label(g, 'single pixels, full resolution', cx, cy + R0 + 12, { size: 9, align: 'center', bg: 'rgba(11,17,16,.75)', color: C.amber });
+          else label(g, 'full resolution', cx, cy + R0 + 12, { size: 9, align: 'center', bg: 'rgba(11,17,16,.75)', color: C.amber });
+          g.restore();
+        },
+        /** each photo's sharpness in the centre, in the order taken: the rise and fall of focus */
+        curve(cur) {
+          const ids = S.photos.map((p, i) => p ? i : -1).filter(i => i >= 0); if (ids.length < 3) return;
+          const m = S.readMain, w = Math.min(120, m.w * 0.34), h = 40, x = m.x + m.w - w - 4, y = m.y + 4;
+          const v = ids.map(i => Math.log(S.photos[i].cf + 1e-9)), lo = Math.min(...v), hi = Math.max(...v);
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+          g.fillStyle = 'rgba(11,17,16,.72)'; roundRect(g, x - 6, y - 4, w + 12, h + 20, 6); g.fill();
+          const X = k => x + (ids.length > 1 ? k / (ids.length - 1) : 0.5) * w, Y = val => y + h - (hi > lo ? (val - lo) / (hi - lo) : 0.5) * (h - 6) - 3;
+          g.strokeStyle = C.accent; g.lineWidth = 1.3; g.beginPath(); v.forEach((val, k) => k ? g.lineTo(X(k), Y(val)) : g.moveTo(X(k), Y(val))); g.stroke(); g.lineWidth = 1;
+          const k = ids.indexOf(cur); if (k >= 0) { g.fillStyle = C.amber; g.beginPath(); g.arc(X(k), Y(v[k]), 3, 0, 6.283); g.fill(); }
+          label(g, 'centre sharpness', x, y + h + 11, { size: 8.5, color: C.muted });
+          g.restore();
         }
       },
 
@@ -500,7 +651,7 @@
       features: {
         layout(t, now) {
           const A = area(), F = S.feats, ids = seq(), stripH = Math.min(34, A.h * 0.12);
-          const per = clamp(SCENES[2].nominal / Math.max(1, Math.min(ids.length, 4)), 1600, 2600);
+          const per = clamp(NOM('features') / Math.max(1, Math.min(ids.length, 2)), 3600, 5200);
           const k = Math.floor(t / per) % Math.max(1, ids.length), i = ids[k], lt = t % per;
           S.featCur = i; S.featLt = lt; S.featPer = per;
           const main = { x: A.x, y: A.y, w: A.w, h: A.h - stripH - 14 };
@@ -510,49 +661,108 @@
           const r = fit(S.photos[i].w, S.photos[i].h, main), pts = F && F.pts[i];
           let cx = 0.5, cy = 0.5;
           if (pts && pts.length) { let sx = 0, sy = 0; for (let j = 0; j < pts.length; j += 2) { sx += pts[j]; sy += pts[j + 1]; } cx = lerp(0.5, sx / (pts.length / 2), 0.5); cy = lerp(0.5, sy / (pts.length / 2), 0.5); }
-          S.camT = { z: 1 + 0.07 * ease(lt / per), x: r.x + r.w * cx, y: r.y + r.h * cy };
+          // then right in on the strongest landmark, while its fingerprint is read out
+          const top = F && F.kp && F.kp[i] && F.kp[i].top, push = top && !reduced ? ease((lt - per * 0.5) / (per * 0.18)) * (1 - ease((lt - per * 0.9) / (per * 0.1))) : 0;
+          S.featPush = push;
+          S.camT = { z: 1 + 0.07 * ease(lt / per) + 1.1 * push, x: lerp(r.x + r.w * cx, top ? r.x + r.w * top.x : 0, push), y: lerp(r.y + r.h * cy, top ? r.y + r.h * top.y : 0, push) };
+          if (push > 0 && push < 1) busy(60, now);
         },
-        draw() {
+        draw(t, now) {
           const F = S.feats, i = S.featCur; if (!F || i == null) return;
-          const fr = j => fit(S.photos[j].w, S.photos[j].h, S.featMain), r = fr(i), lt = S.featLt, per = S.featPer, mix = S.featMix;
+          const fr = j => fit(S.photos[j].w, S.photos[j].h, S.featMain), r = fr(i), lt = S.featLt, per = S.featPer, mix = S.featMix, A = area();
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.beginPath(); g.rect(A.x - 2, 0, A.w + 4, S.featMain.y + S.featMain.h + 4); g.clip(); camTransform();
           if (S.mainPrev && S.mainPrev[0] === 'f' && mix < 1) photoIn(+S.mainPrev.slice(1), fr(+S.mainPrev.slice(1)), 1 - mix);
           photoIn(i, r, mix);
           ring([i]);
           g.save(); g.globalAlpha *= mix;
           g.save(); g.globalAlpha *= 0.35; g.fillStyle = C.bg; g.fillRect(r.x, r.y, r.w, r.h); g.restore();
-          const pts = F.pts[i] || [], m = pts.length / 2, shown = Math.floor((reduced ? 1 : ease(lt / (per * 0.6))) * m);
+          const pts = F.pts[i] || [], m = pts.length / 2, shown = Math.floor((reduced ? 1 : ease(lt / (per * 0.45))) * m);
+          const kp = F.kp && F.kp[i], push = S.featPush || 0;
+          // each landmark at the size of the patch it describes, with a tick for its direction;
           // the newest few in amber and growing, the rest teal: two paths a frame
           const fresh = shown - m * 0.08;
-          for (const [from, to, col] of [[0, Math.max(0, Math.floor(fresh)), 'rgba(79,194,185,.9)'], [Math.max(0, Math.floor(fresh)), shown, C.amber]]) {
-            g.strokeStyle = col; g.beginPath();
+          g.save(); g.globalAlpha *= 1 - 0.6 * push;
+          for (const [from, to, col] of [[0, Math.max(0, Math.floor(fresh)), 'rgba(79,194,185,.85)'], [Math.max(0, Math.floor(fresh)), shown, C.amber]]) {
+            g.strokeStyle = col; g.lineWidth = 1 / S.cam.z; g.beginPath();
             for (let j = from; j < to; j++) {
-              const age = (shown - j) / m, rad = (2.2 + 3 * clamp01(1 - age * 8)) / S.cam.z, x = r.x + pts[2 * j] * r.w, y = r.y + pts[2 * j + 1] * r.h;
+              const age = (shown - j) / m, x = r.x + pts[2 * j] * r.w, y = r.y + pts[2 * j + 1] * r.h;
+              const base = kp ? Math.max(2 / S.cam.z, kp.sz[j] * r.w / 2) : 2.2 / S.cam.z, rad = base * (1 + 0.8 * clamp01(1 - age * 8));
               g.moveTo(x + rad, y); g.arc(x, y, rad, 0, 6.283);
+              if (kp && rad > 3.5 / S.cam.z) { const a = kp.ang[j] * Math.PI / 180; g.moveTo(x, y); g.lineTo(x + rad * Math.cos(a), y + rad * Math.sin(a)); }
             }
             g.stroke();
           }
-          const count = Math.round(F.counts[i] * shown / Math.max(1, m));
-          label(g, `photo ${i + 1}: ${fmt(count)} landmarks`, r.x + 6, r.y + 16, { size: 11, bg: 'rgba(11,17,16,.7)' });
+          g.restore(); g.lineWidth = 1;
+          if (kp && kp.top && push > 0.01) this.fingerprint(kp.top, r, push, (lt - per * 0.55) / (per * 0.3), i);
+          const count = Math.round(F.counts[i] * shown / Math.max(1, m)), [lx, ly] = toScreen(r.x + 6, r.y + 16);
+          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+          label(g, `photo ${i + 1}: ${fmt(count)} landmarks`, clamp(lx, A.x + 6, A.x + A.w - 150), clamp(ly, A.y + 16, A.y + A.h), { size: 11, bg: 'rgba(11,17,16,.7)' });
           g.restore();
-          live(`photo ${i + 1}: ${fmt(F.counts[i])} landmarks (${Math.min(m, F.counts[i])} drawn)`);
+          g.restore(); g.restore();
+          if (push < 0.3) live(`photo ${i + 1}: ${fmt(F.counts[i])} landmarks · ring = patch, tick = angle`);
+          void t; void now;
+        },
+        /** the strongest landmark, ringed, and its fingerprint (binary descriptor) filled in bit by bit */
+        fingerprint(top, r, push, u, i) {
+          const x = r.x + top.x * r.w, y = r.y + top.y * r.h, rad = Math.max(3 / S.cam.z, top.sz * r.w / 2), a = top.ang * Math.PI / 180;
+          g.save(); g.globalAlpha *= push; g.strokeStyle = C.amber; g.lineWidth = 2 / S.cam.z;
+          g.beginPath(); g.arc(x, y, rad, 0, 6.283); g.moveTo(x, y); g.lineTo(x + rad * Math.cos(a), y + rad * Math.sin(a)); g.stroke();
+          // the fingerprint, in screen space so it stays crisp under the zoom
+          const [sx, sy] = toScreen(x, y), A = area(), fp = top.fp, bits = fp.length === 61 ? 486 : fp.length * 8;
+          const cell = Math.min(5.5, (A.w - 28) / fp.length), gw = cell * fp.length, gh = cell * 8;
+          const bx = A.x + (A.w - gw) / 2, by = sy > A.y + A.h * 0.55 ? A.y + 30 : A.y + A.h - gh - 70;
+          g.setTransform(dpr, 0, 0, dpr, 0, 0);
+          g.fillStyle = 'rgba(11,17,16,.84)'; roundRect(g, bx - 8, by - 20, gw + 16, gh + 30, 7); g.fill();
+          g.strokeStyle = 'rgba(255,179,92,.55)'; g.lineWidth = 1; g.beginPath(); g.moveTo(sx, sy + (by > sy ? rad * S.cam.z : -rad * S.cam.z)); g.lineTo(clamp(sx, bx, bx + gw), by > sy ? by - 20 : by + gh + 10); g.stroke();
+          const upto = reduced ? bits : Math.floor(ease(u) * bits);
+          drawBits(g, fp, bx, by, cell, upto);
+          label(g, `its fingerprint: ${upto} of ${bits} bits`, bx, by - 7, { size: 10, color: C.amber });
+          g.restore();
+          live(`${bits} bits: is patch A brighter (or steeper) than patch B?`);
         }
       },
 
       match: {
         layout(t, now) {
           const A = area(), list = S.matches, ids = seq(), stripH = Math.min(30, A.h * 0.1);
-          const per = clamp(SCENES[3].nominal / Math.max(1, Math.min(list.length, 3)), 2600, 4200);
+          const per = clamp(NOM('match') / Math.max(1, Math.min(list.length, 2)), 9000, 10500);
           const m = list[Math.floor(t / per) % list.length]; S.matchCur = m; S.matchLt = t % per;
           const half = (A.w - 10) / 2, ih = A.h - 74 - stripH - 6;
           filmstrip(ids, [m.cur, m.against], stripH, 0.35);
           S.matchMix = swap('m' + list.indexOf(m), now);
           S.matchBoxes = [{ x: A.x, y: A.y + 14, w: half, h: ih }, { x: A.x + half + 10, y: A.y + 14, w: half, h: ih }];
-          S.matchBy = A.y + 14 + ih + 16;
+          S.matchBy = A.y + 14 + ih + 16; S.matchFloor = A.y + A.h - stripH - 8;
           S.camT = { z: 1 };
         },
-        draw() {
-          const A = area(), m = S.matchCur, lt = S.matchLt; if (!m) return;
-          const [ba, bb] = S.matchBoxes, mix = S.matchMix, fr = (j, b) => fit(S.photos[j].w, S.photos[j].h, b);
+        /** a few rounds of the vote, worked out for real on the pairs shown: four pairs give a
+            homography, and every other pair is checked against it */
+        rounds(m) {
+          if (m._rounds) return m._rounds;
+          const src = [], dst = [], ni = m.isrc.length / 2, no = m.osrc.length / 2;
+          for (let j = 0; j < ni; j++) { src.push([m.isrc[2 * j], m.isrc[2 * j + 1]]); dst.push([m.idst[2 * j], m.idst[2 * j + 1]]); }
+          for (let j = 0; j < no; j++) { src.push([m.osrc[2 * j], m.osrc[2 * j + 1]]); dst.push([m.odst[2 * j], m.odst[2 * j + 1]]); }
+          let seed = 7 + m.cur * 31 + m.against;
+          const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+          const thr = m.thr || 3, n = src.length;
+          const judge = H => src.map(([x, y], j) => { const w = H[6] * x + H[7] * y + H[8], u = (H[0] * x + H[1] * y + H[2]) / w, v = (H[3] * x + H[4] * y + H[5]) / w; return Math.hypot(u - dst[j][0], v - dst[j][1]) <= thr; });
+          // ten random rounds, worked out for real; three of them shown, worst first
+          const tried = [];
+          for (let k = 0; k < 40 && tried.length < 10 && n >= 8; k++) {
+            const s4 = new Set(); while (s4.size < 4) s4.add(Math.floor(rnd() * n));
+            const pick = [...s4], H = homog4(pick.map(j => src[j]), pick.map(j => dst[j]));
+            if (H) { const ok = judge(H); tried.push({ pick, ok, agree: ok.filter(Boolean).length }); }
+          }
+          tried.sort((a, b) => a.agree - b.agree);
+          const list = tried.length >= 3 ? [tried[0], tried[Math.floor(tried.length / 2)], tried[tried.length - 2]] : tried.slice();
+          // and the one the stacker kept: its own homography, with four of its agreeing pairs spread out
+          const Hm = m.Hmat || m.H;
+          if (Hm && Hm.length === 9) { const ok = judge(Hm), pick = [0, 1, 2, 3].map(q => Math.min(ni - 1, Math.floor(q * ni / 4))); list.push({ pick, ok, agree: ok.filter(Boolean).length, kept: true }); }
+          return (m._rounds = { src, dst, list, n, thr });
+        },
+        draw(t, now) {
+          const A = area(), m = S.matchCur; if (!m) return;
+          const offA = m.fp ? 2600 : 0, offB = m.isrc.length >= 8 ? 3800 : 0, off = offA + offB, lt = S.matchLt - off;
+          const [ba, bb] = S.matchBoxes, mix = S.matchMix, fr = (j, b) => { const r = fit(S.photos[j].w, S.photos[j].h, b); r.y = b.y + 4; return r; };   // to the top, leaving room below
           const ra = fr(m.cur, ba), rb = fr(m.against, bb);
           if (S.mainPrev && S.mainPrev[0] === 'm' && mix < 1) { const pm = S.matches[+S.mainPrev.slice(1)]; if (pm) { photoIn(pm.cur, fr(pm.cur, ba), 1 - mix); photoIn(pm.against, fr(pm.against, bb), 1 - mix); } }
           photoIn(m.cur, ra, mix); photoIn(m.against, rb, mix);
@@ -562,6 +772,13 @@
           label(g, `photo ${m.cur + 1}`, ra.x + ra.w / 2, ra.y - 3, { size: 10, align: 'center', color: C.muted });
           label(g, `photo ${m.against + 1}${S.order && m.against === S.order.ref ? ' (ref)' : ''}`, rb.x + rb.w / 2, rb.y - 3, { size: 10, align: 'center', color: C.muted });
           const W = m.W, H = m.H, P = (pts, r, j) => [r.x + pts[2 * j] / W * r.w, r.y + pts[2 * j + 1] / H * r.h];
+          if (lt < 0) {
+            const L0 = S.matchLt;
+            if (!reduced && L0 < offA && L0 < 2300) busy(60, now);
+            if (L0 < offA) this.fps(m, ra, rb, L0, A);
+            else this.vote(m, ra, rb, L0 - offA, A, P);
+            g.restore(); return;
+          }
           const grow = reduced ? 1 : ease(lt / 900), judge = reduced ? 1 : ease((lt - 1000) / 700);
           // outvoted pairs: drawn, then flagged magenta and faded
           const no = m.osrc.length / 2, ni = m.isrc.length / 2;
@@ -587,6 +804,54 @@
           g.restore();
           g.restore();
           live(`photo ${m.cur + 1} → photo ${m.against + 1}: ${fmt(m.inliers)} of ${fmt(m.cand)} pairs agree on one plane`);
+        },
+        /** one landmark in each photo, their fingerprints stacked, the differing bits counted */
+        fps(m, ra, rb, lt, A) {
+          const fp = m.fp, W = m.W, H = m.H, pa = [ra.x + fp.pa[0] / W * ra.w, ra.y + fp.pa[1] / H * ra.h], pb = [rb.x + fp.pb[0] / W * rb.w, rb.y + fp.pb[1] / H * rb.h];
+          const k = reduced ? 1 : ease(lt / 500);
+          g.strokeStyle = C.amber; g.lineWidth = 1.5;
+          for (const [x, y] of [pa, pb]) { g.beginPath(); g.arc(x, y, 6, 0, 6.283); g.stroke(); }
+          g.beginPath(); g.moveTo(pa[0], pa[1]); g.lineTo(lerp(pa[0], pb[0], k), lerp(pa[1], pb[1], k)); g.stroke(); g.lineWidth = 1;
+          const py = Math.max(ra.y + ra.h, rb.y + rb.h) + 10, room = S.matchFloor - py;
+          const bytes = fp.a.length, nb = bytes === 61 ? 486 : bytes * 8, cell = Math.max(2.5, Math.min(5, (A.w - 28) / bytes, (room - 58) / 16)), gw = cell * bytes, gh = cell * 8, bx = A.x + (A.w - gw) / 2;
+          g.fillStyle = 'rgba(11,17,16,.86)'; roundRect(g, bx - 8, py, gw + 16, 2 * gh + 58, 7); g.fill();
+          const flash = reduced ? 1 : ease((lt - 900) / 400), d = popXor(fp.a, fp.b);
+          drawBits(g, fp.a, bx, py + 16, cell, 1e9, fp.b, flash);
+          drawBits(g, fp.b, bx, py + 22 + gh, cell, 1e9, fp.a, flash, 'rgba(178,108,255,.95)');
+          label(g, `photo ${m.cur + 1}`, bx, py + 11, { size: 9, color: C.accent });
+          label(g, `photo ${m.against + 1}`, bx + gw, py + 11, { size: 9, align: 'right', color: '#b26cff' });
+          const count = Math.round(d * (reduced ? 1 : ease((lt - 1000) / 600))), ratio = fp.d2 ? fp.d1 / fp.d2 : 0;
+          if (lt > 900) label(g, `${count} bits differ (the Hamming distance)`, bx, py + 2 * gh + 38, { size: 10, color: C.warn });
+          if (lt > 1700 && fp.d2) {
+            g.save(); g.globalAlpha *= reduced ? 1 : ease((lt - 1700) / 400);
+            label(g, `runner-up: ${fp.d2} bits · ${fp.d1}÷${fp.d2} = ${ratio.toFixed(2)} < 0.8 → kept`, bx, py + 2 * gh + 52, { size: 10, color: C.accent });
+            g.restore();
+          }
+          live(`same spot, two photos: ${d} of ${nb} bits differ`);
+        },
+        /** the vote, re-enacted: four pairs propose a homography; the rest agree or don't */
+        vote(m, ra, rb, lt, A, P) {
+          const R = this.rounds(m), per = 820, k = Math.floor(lt / per), u = lt % per, by = S.matchBy;
+          const rd = R.list[Math.min(k, R.list.length - 1)];
+          if (!rd) return;
+          const judged = u > 300 || k >= R.list.length, pt = (q, r) => [r.x + q[0] / m.W * r.w, r.y + q[1] / m.H * r.h];
+          // every pair: agreeing ones teal, the rest faint
+          for (const [want, col] of [[true, 'rgba(79,194,185,.55)'], [false, judged ? 'rgba(255,93,143,.22)' : 'rgba(230,236,232,.16)']]) {
+            g.strokeStyle = col; g.lineWidth = 0.7; g.beginPath();
+            for (let j = 0; j < R.n; j++) { if ((judged ? rd.ok[j] : false) !== want) continue; const [x1, y1] = pt(R.src[j], ra), [x2, y2] = pt(R.dst[j], rb); g.moveTo(x1, y1); g.lineTo(x2, y2); }
+            g.stroke();
+          }
+          // the four that proposed it
+          g.strokeStyle = C.amber; g.lineWidth = 2; g.beginPath();
+          for (const j of rd.pick) { const [x1, y1] = pt(R.src[j], ra), [x2, y2] = pt(R.dst[j], rb); g.moveTo(x1, y1); g.lineTo(x2, y2); }
+          g.stroke(); g.lineWidth = 1;
+          g.fillStyle = C.amber; for (const j of rd.pick) { const [x1, y1] = pt(R.src[j], ra), [x2, y2] = pt(R.dst[j], rb); g.fillRect(x1 - 2.5, y1 - 2.5, 5, 5); g.fillRect(x2 - 2.5, y2 - 2.5, 5, 5); }
+          const kk = Math.min(k, R.list.length - 1) + 1;
+          const res = judged ? `${rd.agree} of ${R.n} agree (±${R.thr.toFixed(1)} px)` : '…';
+          label(g, rd.kept ? `the round kept · ${res}` : `round ${kk} · 4 pairs → H → ${res}`, A.x + A.w / 2, by, { size: 10, align: 'center', color: rd.kept ? C.accent : C.amber });
+          label(g, rd.kept ? 'best of up to 5,000 rounds' : 're-enacted on these pairs', A.x + A.w / 2, by + 16, { size: 9, align: 'center', color: C.muted });
+          live(`any 4 pairs fix an H · the H most pairs agree with wins`);
+          void P;
         }
       },
 
@@ -638,7 +903,7 @@
       flow: {
         layout(t, now) {
           const A = area(), list = S.flows, ids = seq(), stripH = Math.min(30, A.h * 0.1);
-          const per = clamp(SCENES[5].nominal / Math.max(1, Math.min(list.length, 3)), 2600, 4000);
+          const per = clamp(NOM('flow') / Math.max(1, Math.min(list.length, 3)), 2600, 4000);
           const k = Math.floor(t / per) % list.length, f = list[k];
           S.flowCur = f; S.flowK = k; S.flowLt = t % per;
           const main = { x: A.x, y: A.y, w: A.w, h: A.h - stripH - 14 };
