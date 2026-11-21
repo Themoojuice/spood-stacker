@@ -6,7 +6,7 @@
    -72 dBFS as sound, while a phone speaker barely reproduces it) and puts the stack's progress in
    that notification, with the maths view as its picture.
    SpoodKeepAlive.start()                  -> Promise<boolean>; call from a tap (autoplay rules)
-   SpoodKeepAlive.update(title, text, canvas?)   the notification's words and picture
+   SpoodKeepAlive.update(title, text, canvas?, force?)   the notification's words and picture (throttled)
    SpoodKeepAlive.stop()
    SpoodKeepAlive.popOut(canvas)           -> Promise<boolean>; the canvas in a picture-in-picture
                                               window (call from a tap), kept until stop() */
@@ -46,18 +46,25 @@
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
         // the notification's pause button: pausing would let the page freeze, so say so and carry on
-        try { navigator.mediaSession.setActionHandler('pause', () => { update('Still stacking', 'Pausing would let the phone stop the stack. Close the app to stop it.'); }); } catch (e) { /* not supported */ }
+        try { navigator.mediaSession.setActionHandler('pause', () => { update('Still stacking', 'Pausing would let the phone stop the stack. Close the app to stop it.', null, true); }); } catch (e) { /* not supported */ }
         try { navigator.mediaSession.setActionHandler('play', () => { audio && audio.play().catch(() => {}); }); } catch (e) { /* not supported */ }
       }
       return true;
     } catch (e) { playing = false; return false; }
   }
 
-  function update(title, text, canvas) {
+  let lastWords = '', lastWordsAt = 0;
+  function update(title, text, canvas, force = false) {
     if (!playing || !('mediaSession' in navigator) || !root.MediaMetadata) return;
+    // progress comes many times a second, and every change of metadata redraws the notification
+    // (and decodes its picture again): only when the words change, at most once a second, or
+    // when the picture is due
+    const now = performance.now(), words = title + '\n' + text, artDue = !!canvas && now - lastArt > 3500;
+    if (!force && !artDue && (words === lastWords || now - lastWordsAt < 1000)) return;
+    lastWords = words; lastWordsAt = now;
     const meta = { title, artist: text, album: 'Spood Stacker' };
     // the picture: a square crop of the maths view, refreshed every few seconds
-    if (canvas && performance.now() - lastArt > 3500) {
+    if (artDue) {
       try {
         const s = 256, c = document.createElement('canvas'); c.width = c.height = s;
         const k = Math.min(canvas.width, canvas.height);
@@ -93,7 +100,7 @@
     if (audio) { try { audio.pause(); audio.currentTime = 0; } catch (e) { /* ignore */ } }
     if ('mediaSession' in navigator) { try { navigator.mediaSession.playbackState = 'none'; navigator.mediaSession.metadata = null; } catch (e) { /* ignore */ } }
     if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
-    update.art = null;
+    update.art = null; lastWords = ''; lastWordsAt = 0; lastArt = 0;
   }
 
   root.SpoodKeepAlive = { start, update, stop, popOut, humWav, get playing() { return playing; }, canPopOut: () => !!(document.pictureInPictureEnabled && HTMLCanvasElement.prototype.captureStream) };
