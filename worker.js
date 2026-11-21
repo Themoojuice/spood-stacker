@@ -171,6 +171,9 @@ async function scratchStore(shared) {
 
 self.onmessage = async ev => {
   const cv = await cvReady;
+  // how much memory the engine holds (its WebAssembly heap only ever grows while it lives), for
+  // the page's "Clear temporary memory"
+  if (ev.data && ev.data.type === 'mem') { postMessage({ type: 'mem', heap: cv.HEAP8.length }); return; }
   const { files, taken, opts } = ev.data;
   if (pool && !opts.noHelpers) await pool.ready;
   const wantHelpers = pool && pool.size > 0 && !opts.noHelpers;

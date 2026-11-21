@@ -232,6 +232,8 @@ body.rt-open { overflow: hidden; }
 
   <p class="engine" id="engine">Stacking engine: loading…</p>
   <p class="engine" id="coresNote" hidden><span id="coresWhy"></span><button class="linkbtn" id="coresReset" type="button">Use all cores</button></p>
+  <p class="engine" id="clearRow"><button class="linkbtn" id="clearMem" type="button">Clear temporary memory</button></p>
+  <p class="engine" id="clearedNote" role="status" hidden></p>
 </main>
 
 <section id="retouch" class="retouch" hidden aria-label="Retouch">
@@ -302,6 +304,7 @@ body.rt-open { overflow: hidden; }
       else if (d.type === 'frame') rtFrames.push(d.frame);
       else if (d.type === 'done') finish(d.out);
       else if (d.type === 'error') fail(d.message);
+      else if (d.type === 'mem' && memWait) { memWait(d.heap); memWait = null; }
     };
     worker.onerror = e => { e.preventDefault(); if (!ready) engineStatus('could not start. Reload the app.'); else fail(e.message || 'The stacking engine stopped.'); };
   }
@@ -350,7 +353,7 @@ body.rt-open { overflow: hidden; }
     $('count').textContent = files.length === 1 ? '1 photo — add at least one more' : `${files.length} photos`;
     S.chosen.hidden = files.length === 0; refreshGo();
   }
-  function refreshGo() { $('go').disabled = busy || files.length < 2 || !ready; }
+  function refreshGo() { $('go').disabled = busy || files.length < 2 || !ready; $('clearRow').hidden = busy; }
   function showPickError(m) {
     let p = $('pickErr'); if (!p) { p = document.createElement('p'); p.id = 'pickErr'; p.className = 'err'; S.pick.appendChild(p); }
     p.textContent = m; setTimeout(() => { p.textContent = ''; }, 7000);
@@ -456,7 +459,7 @@ body.rt-open { overflow: hidden; }
   }
   async function run() {
     if (busy || files.length < 2 || !ready) return;
-    busy = true; refreshGo(); result = null; rtFrames = []; basePixels = autoBase = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
+    busy = true; refreshGo(); $('clearedNote').hidden = true; result = null; rtFrames = []; basePixels = autoBase = null; refPhoto = 0; plan = null; lastSide = 0; lastHelpers = 0;
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
@@ -713,8 +716,10 @@ body.rt-open { overflow: hidden; }
       }
     });
   });
+  let lastSaveAt = 0;
   function save() {
     if (!result) return;
+    result.saved = true; lastSaveAt = performance.now();
     const a = document.createElement('a'); a.href = result.url; a.download = result.name;
     document.body.appendChild(a); a.click(); a.remove();
     $('savedNote').textContent = `Saved to Downloads as ${result.name}. Tap the picture to open it full size.`;
@@ -778,6 +783,86 @@ body.rt-open { overflow: hidden; }
     $('tame').checked = false;                             // a new burst starts in the usual mode
     $('selection').hidden = true; delete $('selection').dataset.used;
   });
+  // ---------- clear temporary memory ----------
+  // Everything a stack leaves behind, handed back: the stacking engine and its helpers (their
+  // memory only ever grows while they run, so they are closed and started afresh), any scratch
+  // file left by a stack that was cut off, photos still waiting from the share sheet, the
+  // retouch copies, the picture on screen and the maths view's previews, and the record of
+  // stacks cut short (so it goes back to all cores). Kept: your settings and the app itself (so
+  // it still works offline). It ends by starting the page afresh: the only sure way for the
+  // page's own memory to be handed back too. A version on screen that isn't saved yet is saved
+  // first.
+  let memWait = null;
+  const engineHeap = () => new Promise(r => {
+    if (!worker || !ready) return r(0);
+    const t = setTimeout(() => { memWait = null; r(0); }, 1500);
+    memWait = h => { clearTimeout(t); r(h); };
+    worker.postMessage({ type: 'mem' });
+  });
+  window.__engineHeapForTest = engineHeap;
+  const MB = b => b >= 1e9 ? (b / 1073741824).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB';
+  const TRANSIENT = ['spood-running', 'spood-cut-short', 'spood-ok-since-cut', 'spood-lab-run', 'spood-maths-tune'];
+  async function clearMemory() {
+    const note = $('clearedNote');
+    if (busy) return;
+    if (replaying) { note.hidden = false; note.textContent = 'Let the maths replay finish first.'; return; }
+    $('clearMem').disabled = true; $('clearMem').textContent = 'Clearing…';
+    if (refinish) await refinish.catch(() => {});
+    const got = [];
+    // the version on screen, saved if it isn't yet (a download needs a moment to be read)
+    if (result && !result.saved) { save(); got.push(`saved ${result.name} first`); }
+    const wait = 1500 - (performance.now() - lastSaveAt);
+    if (lastSaveAt && wait > 0) await new Promise(r => setTimeout(r, wait));
+    // memory: what the engine and the page were holding
+    const engineMem = await engineHeap();
+    let mem = 0; const what = [];
+    if (basePixels || result) what.push('the picture');
+    if (basePixels) mem += basePixels.data.length;
+    if (autoBase && autoBase !== basePixels) mem += autoBase.data.length;
+    if (result && result.blob) mem += result.blob.size;
+    if (rtFrames.length) what.push('retouch copies');
+    for (const f of rtFrames) mem += (f.blob ? f.blob.size : 0) + (f.data ? f.data.length : 0) + (f.focus && f.focus.data ? f.focus.data.byteLength : 0);
+    if (lastVideo) { what.push('the maths video'); mem += lastVideo.size; }
+    // the engine and its helpers, closed (their scratch file handles go with them)
+    try { worker?.terminate(); } catch (e) { /* already gone */ }
+    worker = null; ready = false;
+    if (maths) { maths.stop(); maths.reset(0); }
+    if (result) URL.revokeObjectURL(result.url);
+    result = null; rtFrames = []; basePixels = autoBase = null; lastVideo = null;
+    // storage: leftover scratch files, photos waiting from the share sheet
+    let scratch = 0, scratchN = 0, shared = 0;
+    try {
+      const dir = await navigator.storage.getDirectory();
+      const names = []; for await (const k of dir.keys()) if (k.startsWith('spood-scratch-')) names.push(k);
+      for (const k of names) {
+        let size = 0; try { size = (await (await dir.getFileHandle(k)).getFile()).size; } catch (e) { /* in use a moment longer */ }
+        for (let i = 0; i < 5; i++) { try { await dir.removeEntry(k); scratch += size; scratchN++; break; } catch (e) { await new Promise(r => setTimeout(r, 200)); } }
+      }
+    } catch (e) { /* no private file storage here */ }
+    try { if (await caches.has('spood-shared')) { shared = (await (await caches.open('spood-shared')).keys()).length; await caches.delete('spood-shared'); } } catch (e) { /* no caches */ }
+    try { TRANSIENT.forEach(k => localStorage.removeItem(k)); } catch (e) { /* private mode */ }
+    const parts = [];
+    if (mem > 0) parts.push(`about ${MB(mem)} the page was holding (${what.join(', ')})`);
+    if (scratchN) parts.push(`${scratchN} leftover scratch file${scratchN > 1 ? 's' : ''} (${MB(scratch)})`);
+    if (shared) parts.push(`${shared} photo${shared > 1 ? 's' : ''} waiting from the share sheet`);
+    if (cutShort) parts.push('the record of stacks cut short (back to all cores)');
+    const msg = (parts.length ? 'Cleared ' + parts.join(', ') : 'Cleared') + (got.length ? '; ' + got.join('; ') : '') + '. Kept: your settings and the app itself.';
+    try { sessionStorage.setItem('spood-cleared', JSON.stringify({ msg, engine: engineMem })); } catch (e) { /* private mode */ }
+    location.replace(new URL('./', location.href).href);      // a fresh start: the page's own memory goes too
+  }
+  $('clearMem').addEventListener('click', clearMemory);
+  try {
+    const c = JSON.parse(sessionStorage.getItem('spood-cleared') || 'null');
+    if (c) {
+      sessionStorage.removeItem('spood-cleared');
+      const note = $('clearedNote'), m = c.msg + ' The stacking engine was restarted' + (c.engine ? `: it held ${MB(c.engine)}` : '');
+      note.hidden = false; note.textContent = m + '.';
+      // what the fresh engine starts with, once it's up
+      const show = async () => { const h = await engineHeap(); if (h) note.textContent = m + (c.engine ? `, a fresh one holds ${MB(h)}.` : ` (it now holds ${MB(h)}).`); };
+      const t = setInterval(() => { if (ready) { clearInterval(t); show(); } }, 250);
+      setTimeout(() => clearInterval(t), 60000);
+    }
+  } catch (e) { /* private mode */ }
   addEventListener('beforeunload', e => { if (busy) { e.preventDefault(); e.returnValue = ''; } });
 })();
 </script>

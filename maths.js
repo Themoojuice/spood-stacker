@@ -1620,14 +1620,41 @@
       }
     });
 
-    let lastFrame = 0;
-    // ~30 frames a second while something moves, ~12 while the scene only breathes
+    let lastFrame = 0, lastT = 0, timer = 0, inView = true;
+    // ~30 frames a second while something moves, ~12 while the scene only breathes. Between frames
+    // the page asks for nothing (a timer wakes it just before the next one is due), rather than
+    // waking on every refresh of a 120 Hz screen only to skip it; and while the picture is
+    // scrolled out of sight the scenes keep time but nothing is drawn (except when recording or
+    // popped out, where the picture is seen elsewhere)
+    const rate = () => 1000 / (S && (S.rec || performance.now() < S.busyUntil) ? TUNE.fps : TUNE.idle);
     function loop(now) {
+      raf = 0;
       if (!running) return;
-      const every = S && (S.rec || now < S.busyUntil) ? 1000 / TUNE.fps : 1000 / TUNE.idle;
-      if (now - lastFrame >= every - 2) { lastFrame = now; frame(now); }
-      raf = requestAnimationFrame(loop);
+      if (S && S.rec) {
+        // recording: checked on every refresh, so the video gets its full frame rate
+        if (now - lastT >= rate() - 2) { lastT = now; lastFrame = performance.now(); frame(now); }
+        raf = requestAnimationFrame(loop); return;
+      }
+      lastT = now; lastFrame = performance.now();
+      const seen = inView || (root.document && document.pictureInPictureElement);
+      if (seen) frame(now); else unseen(now);
+      // the next frame: a timer to just before it's due, then the screen's next refresh (out of
+      // sight, four times a second is plenty to keep time)
+      clearTimeout(timer);
+      timer = setTimeout(() => { timer = 0; if (running && !raf) raf = requestAnimationFrame(loop); }, Math.max(0, lastFrame + (seen ? rate() : 250) - performance.now() - 4));
     }
+    /** time passes for the scenes; nothing is drawn */
+    function unseen(now) {
+      if (!S) return;
+      const dt = clamp(lastNow ? now - lastNow : 16, 0, 200); lastNow = now;
+      advance(now, dt);
+      const t = (now - S.sceneAt) / (S.manual ? 1 : S.scale);
+      if (S.fin && !S.fin.done && S.scene === REVEAL && t > SCENES[REVEAL].nominal) S.fin.resolve();
+    }
+    if (root.IntersectionObserver) new IntersectionObserver(es => {
+      const was = inView; inView = es[es.length - 1].isIntersecting;
+      if (inView && !was && running && timer) { clearTimeout(timer); timer = 0; if (!raf) raf = requestAnimationFrame(loop); }   // back in sight: draw now
+    }).observe(canvas);
     reset();
     return {
       reset, peek, progress, log, frame, finale, replay,
@@ -1636,7 +1663,7 @@
       /** whether there's a whole stack's worth of previews to replay */
       get canReplay() { return !!(S && S.photos.some(Boolean) && S.strips.length && S.box); },
       start() { if (running) return; running = true; lastNow = 0; raf = requestAnimationFrame(loop); },
-      stop() { running = false; cancelAnimationFrame(raf); },
+      stop() { running = false; cancelAnimationFrame(raf); raf = 0; clearTimeout(timer); timer = 0; },
       get state() { return S; },
       scenes: SCENES
     };

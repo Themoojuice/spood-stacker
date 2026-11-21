@@ -455,7 +455,7 @@
     // ---------- 7. finish ----------
     const sharp = sharpenF(cv, fused, SHARPEN); fused.delete();
     const crop = sharp.roi(new cv.Rect(box.x, box.y, box.w, box.h));
-    const u8 = new cv.Mat(); crop.convertTo(u8, cv.CV_8U, 255, 0.5); crop.delete(); sharp.delete();
+    const u8 = new cv.Mat(); crop.convertTo(u8, cv.CV_8U, 255); crop.delete(); sharp.delete();   // (convertTo rounds)
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
     out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
     rgba.delete();
@@ -561,19 +561,20 @@
   /** How well a photo agrees with the reference where either of them is sharp
       (the subject), 0..1. The frame-wide mean is dominated by background, so a
       small subject that walked off barely moves it; this weights by sharpness. */
-  function subjectAgreement(cv, refG, curG, ghostHalf, coverHalf, lookPastHalf) {
+  function subjectAgreement(cv, refG, curG, ghostHalf, coverHalf, lookPastHalf, rc = null) {
     const sz = new cv.Size(ghostHalf.cols, ghostHalf.rows);
     const half = g => {
       if (g.cols === sz.width && g.rows === sz.height) return focusMeasure(cv, g, 3);     // already half size
       const s = new cv.Mat(); cv.resize(g, s, sz, 0, 0, cv.INTER_AREA); const f = focusMeasure(cv, s, 3); s.delete(); return f;
     };
-    const fr = half(refG), fc = half(curG), R = fr.data32F, C = fc.data32F, G = ghostHalf.data32F;
+    // the reference's side is the same for every photo: made once per run (rc: the reference cache)
+    const fr = rc ? (rc.focusHalf || (rc.focusHalf = half(refG))) : half(refG), fc = half(curG), R = fr.data32F, C = fc.data32F, G = ghostHalf.data32F;
     const V = coverHalf ? coverHalf.data32F : null;           // only where the photo has pixels of its own
     const N = R.length, mx = new Float32Array(N);
     for (let k = 0; k < N; k++) mx[k] = V && V[k] < 0.5 ? 0 : Math.max(R[k], C[k]);
     // glare (opts.tame) counts for nothing here: it is the light's reflection, not the subject
     if (lookPastHalf) { const X = lookPastHalf.data32F; for (let k = 0; k < N; k++) mx[k] *= 1 - X[k]; }
-    fr.delete(); fc.delete();
+    if (!rc) fr.delete(); fc.delete();
     const sorted = Float32Array.from(mx.filter((v, k) => k % 5 === 0 && v > 0)).sort();
     const top = sorted[Math.floor(sorted.length * 0.99)] || 1e-9;
     let sw = 0, sg = 0;
@@ -654,6 +655,15 @@
     cv.multiply(l, l, l);
     const o = new cv.Mat(); cv.GaussianBlur(l, o, new cv.Size(0, 0), sigma, sigma); l.delete();
     return o;
+  }
+  /** focusMeasure at several smoothings, the squared Laplacian made once (the same numbers) */
+  function focusMeasures(cv, g, sigmas) {
+    const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), 0.8, 0.8);
+    const l = new cv.Mat(); cv.Laplacian(b, l, cv.CV_32F, 3); b.delete();
+    cv.multiply(l, l, l);
+    const out = sigmas.map(sg => { const o = new cv.Mat(); cv.GaussianBlur(l, o, new cv.Size(0, 0), sg, sg); return o; });
+    l.delete();
+    return out;
   }
 
   /** Where each photo has usable pixels (1) vs the black clamp edge of a clip-on
@@ -1149,7 +1159,7 @@
     const blurHalf = new cv.Mat(); cv.GaussianBlur(half, blurHalf, new cv.Size(0, 0), 3, 3);
     const f = W > 1200 ? 0.5 : 1;                          // as bandNCC: half size for big photos
     const band = nccBand(cv, f === 1 ? refF : half, f);
-    return { W, H, s, a, af, rs, half, blurHalf, f, band, free() { [a, af, rs, half, blurHalf, band].forEach(m => m.delete()); } };
+    return { W, H, s, a, af, rs, half, blurHalf, f, band, focusHalf: null, free() { [a, af, rs, half, blurHalf, band, this.focusHalf].forEach(m => m && m.delete()); } };
   }
   function flowPrep(cv, g, s) {
     const W = g.cols, H = g.rows;
@@ -1305,42 +1315,66 @@
       rowCache.set(r, e);
       return e;
     };
-    /** rows y0..y1: fx, fy = the correction (pixels), or with maps the source position */
-    function band(y0, y1, fx, fy, maps) {
-      for (let y = y0, o = 0; y < y1; y++) {
-        const r0 = ty.i0[y], wy = ty.w1[y], iy = 1 - wy, R0 = hrow(r0), R1 = hrow(Math.min(h - 1, r0 + 1));
+    // working rows whose gate is zero all the way across: output rows made only from them get no
+    // correction at all (the gate multiplies it), so they are skipped
+    const still = new Uint8Array(h);
+    for (let r = 0; r < h; r++) { let z = 1; for (let c = r * w, e = c + w; c < e; c++) if (A[c] !== 0) { z = 0; break; } still[r] = z; }
+    /** rows y0..y1 as source positions (maps fx, fy, band-relative). ext (per tile of TW columns):
+        the first and last band row the correction moves in that tile. stat: counts, where stat.M
+        (the full-size 8-bit overlap) is set, the pixels moved by more than 0.5 px */
+    function band(y0, y1, fx, fy, ext, TW, stat) {
+      const M = stat ? stat.M : null;
+      for (let y = y0, o = 0; y < y1; y++, o += W) {
+        const r0 = ty.i0[y], r1 = Math.min(h - 1, r0 + 1);
+        if (still[r0] && still[r1]) { for (let x = 0; x < W; x++) { fx[o + x] = x; fy[o + x] = y; } continue; }   // no correction in this row
+        const wy = ty.w1[y], iy = 1 - wy, R0 = hrow(r0), R1 = hrow(r1), by = y - y0;
         const U0 = R0.u, V0 = R0.v, G0 = R0.g, U1 = R1.u, V1 = R1.v, G1 = R1.g;
-        for (let x = 0; x < W; x++, o++) {
+        for (let x = 0; x < W; x++) {
           // then the vertical pass
           let u = Math.fround(U0[x] * iy + U1[x] * wy), v = Math.fround(V0[x] * iy + V1[x] * wy);
           u = Math.fround(u / s); v = Math.fround(v / s);
           if (u * u + v * v > near) { const m = Math.hypot(u, v); if (m > maxPx) { u = Math.fround(u * (maxPx / m)); v = Math.fround(v * (maxPx / m)); } }
           const g = Math.fround(G0[x] * iy + G1[x] * wy);
           u = Math.fround(u * g); v = Math.fround(v * g);
-          if (maps) { fx[o] = x + u; fy[o] = y + v; } else { fx[o] = u; fy[o] = v; }
+          fx[o + x] = x + u; fy[o + x] = y + v;
+          if (u !== 0 || v !== 0) {
+            const t = 2 * ((x / TW) | 0); if (by < ext[t]) ext[t] = by; if (by > ext[t + 1]) ext[t + 1] = by;
+            if (M && M[y * W + x] && u * u + v * v > 0.25) stat.mv++;
+          }
         }
       }
     }
     return {
-      /** share of the overlap (8-bit mask) that the correction moves by more than 0.5 px */
-      movedShare(mask) {
-        const M = mask.data; let a = 0, mv = 0;
-        const fx = new Float32Array(BAND * W), fy = new Float32Array(BAND * W);
+      /** Each source in list ({src: a full-size Mat, interp, sink(y0, mat)}) resampled through the
+          correction and handed to its sink a band of rows at a time. The band's maps are made once
+          for all of them, and only the tiles the correction moves are resampled: where it is zero,
+          remap gives back the source pixel itself and a part of the frame comes out exactly as the
+          whole would (both checked), so the result is the same as resampling everything.
+          mask (optional, full-size 8-bit overlap): returns the share of it moved by more than 0.5 px. */
+      remap(cv, list, mask) {
+        const TW = 128, nt = Math.ceil(W / TW), ext = new Int32Array(2 * nt);
+        const stat = mask ? { M: mask.data, mv: 0 } : null;
         for (let y0 = 0; y0 < H; y0 += BAND) {
-          const y1 = Math.min(H, y0 + BAND); band(y0, y1, fx, fy, false);
-          for (let k = y0 * W, o = 0; k < y1 * W; k++, o++) { if (!M[k]) continue; a++; if (fx[o] * fx[o] + fy[o] * fy[o] > 0.25) mv++; }
+          const y1 = Math.min(H, y0 + BAND), bh = y1 - y0;
+          const mx = new cv.Mat(bh, W, cv.CV_32F), my = new cv.Mat(bh, W, cv.CV_32F);
+          for (let t = 0; t < nt; t++) { ext[2 * t] = bh; ext[2 * t + 1] = -1; }
+          band(y0, y1, mx.data32F, my.data32F, ext, TW, stat);
+          for (const { src, interp, sink } of list) {
+            const rows = src.roi(new cv.Rect(0, y0, W, bh)), o = rows.clone(); rows.delete();
+            for (let t = 0; t < nt; t++) {
+              const a = ext[2 * t], b = ext[2 * t + 1]; if (b < a) continue;
+              const rect = new cv.Rect(t * TW, a, Math.min(TW, W - t * TW), b - a + 1);
+              const ax = mx.roi(rect), ay = my.roi(rect), part = new cv.Mat();
+              cv.remap(src, part, ax, ay, interp, cv.BORDER_REFLECT); ax.delete(); ay.delete();
+              const d = o.roi(rect); part.copyTo(d); d.delete(); part.delete();
+            }
+            sink(y0, o); o.delete();
+          }
+          mx.delete(); my.delete();
         }
-        return a ? mv / a : 0;
-      },
-      /** src (full size) resampled through the correction, handed to sink(y0, mat) a band at a time */
-      remap(cv, src, interp, sink) {
-        for (let y0 = 0; y0 < H; y0 += BAND) {
-          const y1 = Math.min(H, y0 + BAND);
-          const mx = new cv.Mat(y1 - y0, W, cv.CV_32F), my = new cv.Mat(y1 - y0, W, cv.CV_32F);
-          band(y0, y1, mx.data32F, my.data32F, true);
-          const o = new cv.Mat(); cv.remap(src, o, mx, my, interp, cv.BORDER_REFLECT); mx.delete(); my.delete();
-          sink(y0, o); o.delete();
-        }
+        if (!stat) return null;
+        const a = cv.countNonZero(mask);
+        return a ? stat.mv / a : 0;
       }
     };
   }
@@ -1719,9 +1753,10 @@
     for (let i = 0; i < n; i++) {
       // grey copy made on the fly (keeps memory down on phones)
       const im = unpark(cv, imgs8[i]), gray = toGray(cv, im); im.delete();
-      const f = focusMeasure(cv, gray, 4);
+      // focusMeasure(gray, 4) and focusMeasure(gray, 2), sharing the squared Laplacian
+      const [f, f2] = focusMeasures(cv, gray, [4, 2]);
       const s = new cv.Mat(); cv.resize(f, s, half, 0, 0, cv.INTER_AREA); f.delete(); Fh.push(s);
-      const f2 = focusMeasure(cv, gray, 2), T = f2.data32F, V = pdata(valid[i]);
+      const T = f2.data32F, V = pdata(valid[i]);
       for (let k = 0; k < T.length; k++) if (V[k] && T[k] > texMax[k]) texMax[k] = T[k];
       f2.delete();
       const gs = new cv.Mat(); cv.resize(gray, gs, half, 0, 0, cv.INTER_AREA); const S = gs.data32F;
@@ -1751,7 +1786,8 @@
     // --- texture mask (where detail is taken from the sharpest photos, not averaged) ---
     const tex = cv.matFromArray(H, W, cv.CV_32F, texMax);
     const tb = new cv.Mat(); cv.GaussianBlur(tex, tb, new cv.Size(0, 0), 25, 25);
-    const sorted = Float32Array.from(texMax.filter((_, k) => k % 7 === 0)).sort();
+    // (a strip has the whole frame's thresholds already)
+    const sorted = stats ? null : Float32Array.from(texMax.filter((_, k) => k % 7 === 0)).sort();
     const lo = stats ? stats.lo : sorted[Math.floor(sorted.length * .35)], hi = stats ? stats.hi : sorted[Math.floor(sorted.length * .65)];
     const TM = new cv.Mat(H, W, cv.CV_32F), tm = TM.data32F, TB = tb.data32F;
     for (let k = 0; k < tm.length; k++) {
@@ -1790,8 +1826,10 @@
           const e = bandEnergy(cv, lp[L]), E = e.data32F, C2 = lp[L].data32F;
           const G = gg[L].data32F, BE = bestE[L], BC = bestC[L];
           // noise of this band: the typical detail where this photo is out of focus
-          const smp = []; for (let k = 0, p = 0; k < E.length; k += 37, p += 111) if (G[k] > 0.5) smp.push(Math.abs(C2[p]) + Math.abs(C2[p + 1]) + Math.abs(C2[p + 2]));
-          if (!stats && smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
+          if (!stats) {                                  // (a strip has the whole frame's noise already)
+            const smp = []; for (let k = 0, p = 0; k < E.length; k += 37, p += 111) if (G[k] > 0.5) smp.push(Math.abs(C2[p]) + Math.abs(C2[p + 1]) + Math.abs(C2[p + 2]));
+            if (smp.length > 100) { smp.sort((x, y) => x - y); noise[L] = Math.min(noise[L], smp[smp.length >> 2]); }
+          }
           for (let k = 0, p = 0; k < E.length; k++, p += 3) {
             const v = E[k] * G[k];
             if (v > BE[k]) { BE[k] = v; BC[p] = C2[p]; BC[p + 1] = C2[p + 1]; BC[p + 2] = C2[p + 2]; }
@@ -1875,7 +1913,9 @@
     for (let y0 = 0; y0 < H; y0 += core) { const y1 = Math.min(H, y0 + core); out.push({ y0, y1, e0: Math.max(0, y0 - STRIP_OV), e1: Math.min(H, y1 + STRIP_OV) }); }
     return out;
   }
-  const to8px = v => { const r = Math.round(v * 255 + 0.5); return r < 0 ? 0 : r > 255 ? 255 : r; };
+  // rounded to the nearest level (it was + 0.5 before rounding, which made every pixel half a level
+  // brighter on average and lifted black backgrounds a level: found on the night burst, 14 Nov)
+  const to8px = v => { const r = Math.round(v * 255); return r < 0 ? 0 : r > 255 ? 255 : r; };
 
   /** The merge done a band of rows at a time, so its memory follows the band's height, not
       the frame's. Each strip is merged with 256 rows of context above and below (enough for the
@@ -2234,33 +2274,35 @@
       // rows at a time, only where they are used
       const fl = denseFlow(cv, rc, curF, both);
       const field = flowField(fl, gateFlow(cv, fl, rc, curF));
-      const share = field.movedShare(both);
-      let candG = null;
-      if (share > 0) {
-        candG = new cv.Mat(H, W, cv.CV_32F);
-        field.remap(cv, curF, cv.INTER_LINEAR, (y0, m) => candG.data32F.set(m.data32F, y0 * W));
-      }
+      // the corrected grey (to judge the correction by) and the share of the overlap it moves, in
+      // one pass; only the parts it moves are resampled
+      let candG = new cv.Mat(H, W, cv.CV_32F);
+      const share = field.remap(cv, [{ src: curF, interp: cv.INTER_LINEAR, sink: (y0, m) => candG.data32F.set(m.data32F, y0 * W) }], both);
+      if (!(share > 0)) { candG.delete(); candG = null; }
       const mH = halfMask(cv, both, rc), nccG = nccWith(cv, rc, curF, curH, mH);
       curF.delete(); curH.delete();
       const nccF = candG ? nccWith(cv, rc, candG, null, mH) : -1;
       mH.delete();
       const res = { share, nccG, nccF, accepted: false };
-      if (candG && nccF >= nccG + 0.002) {
-        res.accepted = true;
-        const wsrc = unpark(cv, a.img); res.rgb = new Uint8Array(W * H * 3);
-        field.remap(cv, wsrc, cv.INTER_LANCZOS4, (y0, m) => res.rgb.set(m.data, y0 * W * 3)); wsrc.delete();
-        const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); res.g8 = new Uint8Array(g8.data); g8.delete();
-        const mf = new cv.Mat(); wmCur.convertTo(mf, cv.CV_32F); res.m8 = new Uint8Array(W * H);
-        field.remap(cv, mf, cv.INTER_LINEAR, (y0, mr) => {
-          const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY);
-          const b8 = new cv.Mat(); mb.convertTo(b8, cv.CV_8U); mb.delete(); res.m8.set(b8.data, y0 * W); b8.delete();
-        });
-        mf.delete();
-      }
       if (a.peek) {                                       // previews: disagreement before and after the correction
         const dis = m => { const D = m.data32F, u = new Uint8Array(D.length); for (let q = 0; q < D.length; q++) u[q] = Math.round(255 * (1 - Math.min(1, Math.max(0, D[q])))); return peekThumb(u, hw, hh, 1, 200); };
         res.disG = dis(plain);
         if (candG) { const cH = halfOf(cv, candG, hw, hh), gF = ghostHalf(cv, rc.blurHalf, cH); res.disF = dis(gF); cH.delete(); gF.delete(); }
+      }
+      if (candG && nccF >= nccG + 0.002) {
+        res.accepted = true;
+        const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); res.g8 = new Uint8Array(g8.data); g8.delete();
+        candG.delete(); candG = null;                     // before the photo and its mask come in
+        // the photo and its mask through the same correction, sharing each band's maps
+        const wsrc = unpark(cv, a.img), mf = new cv.Mat(); wmCur.convertTo(mf, cv.CV_32F);
+        res.rgb = new Uint8Array(W * H * 3); res.m8 = new Uint8Array(W * H);
+        field.remap(cv, [
+          { src: wsrc, interp: cv.INTER_LANCZOS4, sink: (y0, m) => res.rgb.set(m.data, y0 * W * 3) },
+          { src: mf, interp: cv.INTER_LINEAR, sink: (y0, mr) => {
+            const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY);
+            const b8 = new cv.Mat(); mb.convertTo(b8, cv.CV_8U); mb.delete(); res.m8.set(b8.data, y0 * W); b8.delete();
+          } }]);
+        wsrc.delete(); mf.delete();
       }
       if (candG) candG.delete();
       if (a.peek) res.grid = peekFlowGrid(fl.fs, fl.s, 28);
@@ -2289,7 +2331,7 @@
       const ex = a.shine ? shineHalf(cv, a.shine.E, a.shine.aw, a.shine.ah, hw, hh) : null;
       const pen = a.shine ? shineHalf(cv, a.shine.D, a.shine.aw, a.shine.ah, hw, hh) : null;
       if (ex) lookPast(cv, g, ex);
-      if (a.judge) { res.m = maskedMean(g.data32F, cover.data32F); res.sm = subjectAgreement(cv, rc.half, curH, g, cover, ex); }
+      if (a.judge) { res.m = maskedMean(g.data32F, cover.data32F); res.sm = subjectAgreement(cv, rc.half, curH, g, cover, ex, rc); }
       const curH2 = a.shine && a.judge ? curH.clone() : null;
       curH.delete(); if (ex) ex.delete();
       const tm = unpark(cv, a.trust), U = g.data32F, C = cover.data32F, T = tm.data;

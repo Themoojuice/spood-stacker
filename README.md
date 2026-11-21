@@ -45,7 +45,10 @@ While it stacks, the app animates what the engine is actually doing, from the en
 - **Replay the maths** (on the result) plays the whole film again at its full length, close-ups and all, from the previews kept since the stack, ending on the reveal.
 - **Save the maths as a video** records that replay from the picture itself (MP4 where the browser can make it, as Chrome on Android can; otherwise WebM), about a minute and a half, 4:5, and saves it to Downloads, with **Share the video…** where the phone offers it.
 
-The previews are small and read-only: the stack is identical with them on or off. On the 2-core test machine, with software drawing, the view costs about 3–7% of the stack's time (it draws at 30 frames a second only while something moves, 12 otherwise).
+The previews are small and read-only: the stack is identical with them on or off. On the 2-core test machine, with software drawing, the view costs about 3–7% of the stack's time (it draws at 30 frames a second only while something moves, 12 otherwise; between frames it asks the browser for nothing, and while the picture is scrolled out of sight it keeps time without drawing).
+
+### Clear temporary memory
+At the foot of the start and result screens. Hands back everything a stack leaves behind: the stacking engine and its helpers (their memory only grows while they run, so they're closed and started afresh), any scratch file left by a stack that was cut off, photos still waiting from the share sheet, the retouch copies, the picture on screen and the maths view's previews, and the record of stacks cut short (so it's back to all cores). A version on screen that isn't saved yet (say, after changing the sharpening) is saved first. Kept: your settings and the app itself, so it still works offline. The page then starts afresh and says what was cleared.
 
 ### Switching apps while it stacks (experimental)
 Android closes a browser page that's been off screen for a while. Two things may keep a stack going:
