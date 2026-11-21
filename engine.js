@@ -307,7 +307,7 @@
     const fjobs = order.filter(c => c !== ref).map(cur => ({ cur, wg: wg[cur], wm: wmask[cur], img: warped[cur], wgRef: wg[ref], wmRef: wmask[ref], key: refKey, W, H, hw, hh, peek: !!peek }));
     const fres = await each('flow', fjobs, (k, r, j) => {
       progress(at('flow', k / fjobs.length), 'Correcting movement');
-      if (peek && r) { peek('flow', { cur: fjobs[j].cur, W, H, grid: r.grid, share: r.share, nccG: r.nccG, nccF: r.nccF, accepted: r.accepted, trust: peekThumb(r.trust, hw, hh, 1, 200) }); r.grid = null; }
+      if (peek && r) { peek('flow', { cur: fjobs[j].cur, W, H, grid: r.grid, share: r.share, nccG: r.nccG, nccF: r.nccF, accepted: r.accepted, trust: peekThumb(r.trust, hw, hh, 1, 200), disG: r.disG || null, disF: r.disF || null }); r.grid = r.disG = r.disF = null; }
     });
     fjobs.forEach((j, k) => {
       const cur = j.cur, r = fres[k];
@@ -371,7 +371,7 @@
     // the reference there (ghost), has pixels of its own there (coverage, fading to 0 over a
     // short band at its edge so a photo that ends mid-frame leaves no seam), and its
     // line-up can be trusted there (trust).
-    const usable = new Array(n);
+    const usable = new Array(n), ghosts = [];
     for (let i = 0; i < n; i++) {
       const r = sres[i];
       if (keep[i] && i !== ref) {
@@ -382,10 +382,12 @@
         else if (gap) say(`photo ${i + 1}: taken ${gapText(gap)} the others; used wherever it matches`);
       }
       if (opts.onDebug) opts.onDebug('usable', { i, hw, hh, usable: Uint8Array.from(r.usable) });
+      if (peek) ghosts.push({ i, sm: r.sm == null ? null : r.sm, m: r.m == null ? null : r.m, usable: peekThumb(r.usable, hw, hh, 1, 160) });
       usable[i] = parkData(r.usable, hh, hw, cv.CV_8U, 1);  // 8-bit (0..1 in 1/255 steps), parked
       r.usable = r.maskT = null;
     }
     refCacheFree();
+    if (peek) peek('ghosts', { ref, list: ghosts, need: opts.tame ? SUBJECT_MOVED_TAME : SUBJECT_MOVED, left: [...Array(n).keys()].filter(i => !keep[i]).map(i => ({ i, why: why[i] })) });
     let idx = [...Array(n).keys()].filter(i => keep[i]);
     // (d) photos that add no sharp detail the others don't already have
     if (peek) peek('winners', peekWinners(idx, sres, n, keep, why, order, W, H, qs));
@@ -405,7 +407,7 @@
     const seen = unpark(cv, wmask[idx[0]]);
     for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
     const box = largestRect(cv, seen); seen.delete();
-    if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1) });
+    if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1), left: left.map(i => ({ i, why: why[i] })) });
 
     // ---------- 5b. hand the lined-up photos to the retouch brush ----------
     // Each is cropped and finished exactly like the stack, so painted pixels match.
@@ -1073,7 +1075,7 @@
     if (!Hn) return { H, ok: false };
     const e0 = pairs ? pairError(H, pairs) : 0, e1 = pairs ? pairError(Hn, pairs) : 0;
     if (!(e1 < Math.max(4, 0.004 * big, 2 * e0))) return { H, ok: false };
-    return { H: Hn, ok: true };
+    return { H: Hn, ok: true, rho: Hn.rho };
   }
 
   /** How strongly fine detail repeats (an insect screen, woven fabric), 0 = not at all.
@@ -1124,9 +1126,9 @@
     const Wm = cv.matFromArray(3, 3, cv.CV_32F, mul3(mul3(S, inv3(H)), Si));
     let out = null;
     try {
-      cv.findTransformECC(d, s, Wm, cv.MOTION_HOMOGRAPHY, new cv.TermCriteria(3, iters, 1e-5), m, 5);
+      const rho = cv.findTransformECC(d, s, Wm, cv.MOTION_HOMOGRAPHY, new cv.TermCriteria(3, iters, 1e-5), m, 5);
       const Hn = inv3(mul3(mul3(Si, Array.from(Wm.data32F)), S));
-      if (Hn.every(isFinite)) out = Hn;
+      if (Hn.every(isFinite)) { out = Hn; out.rho = rho; }   // the correlation it reached (for the maths view)
     } catch (e) { if (typeof process !== "undefined" && process.env.ECCDBG) console.log("ECC err", typeof e === "number" && cv.exceptionFromPtr ? cv.exceptionFromPtr(e).msg : e); }
     [s, d, m, Wm].forEach(x => x.delete());
     return out;
@@ -2115,7 +2117,7 @@
         if (a.peek) {
           const pick = (A, B, k) => { const m = A.length / 2, st = Math.max(1, Math.ceil(m / k)), o = [[], []]; for (let j = 0; j < m; j += st) { o[0].push(A[2 * j], A[2 * j + 1]); o[1].push(B[2 * j], B[2 * j + 1]); } return o; };
           const [isrc, idst] = pick(h.src || [], h.dst || [], 160), [osrc, odst] = pick(h.osrc || [], h.odst || [], 60);
-          peeks.push({ cur, against, inliers: best, cand: h.cand || best, rough: !!h.rough, isrc, idst, osrc, odst, Hfeat: Hm.slice(), Hmat: r.H.slice(), ecc: r.skipped ? 'skipped' : r.ok ? 'ok' : 'failed',
+          peeks.push({ cur, against, inliers: best, cand: h.cand || best, rough: !!h.rough, isrc, idst, osrc, odst, Hfeat: Hm.slice(), Hmat: r.H.slice(), ecc: r.skipped ? 'skipped' : r.ok ? 'ok' : 'failed', rho: r.ok && r.rho != null ? r.rho : null,
             fp: h.fp || null, thr: h.thr || 3 });
         }
         if (h.rough && r.ok) logs.push(`photo ${cur + 1}: framed well apart from the others; lined up by its overall shape first`);
@@ -2219,6 +2221,11 @@
           const b8 = new cv.Mat(); mb.convertTo(b8, cv.CV_8U); mb.delete(); res.m8.set(b8.data, y0 * W); b8.delete();
         });
         mf.delete();
+      }
+      if (a.peek) {                                       // previews: disagreement before and after the correction
+        const dis = m => { const D = m.data32F, u = new Uint8Array(D.length); for (let q = 0; q < D.length; q++) u[q] = Math.round(255 * (1 - Math.min(1, Math.max(0, D[q])))); return peekThumb(u, hw, hh, 1, 200); };
+        res.disG = dis(plain);
+        if (candG) { const cH = halfOf(cv, candG, hw, hh), gF = ghostHalf(cv, rc.blurHalf, cH); res.disF = dis(gF); cH.delete(); gF.delete(); }
       }
       if (candG) candG.delete();
       if (a.peek) res.grid = peekFlowGrid(fl.fs, fl.s, 28);
