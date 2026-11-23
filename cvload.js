@@ -18,8 +18,13 @@ const cvReady = new Promise(resolve => {
   else c.onRuntimeInitialized = () => fin(c);
 });
 
-const errText = (cv, e) => (typeof e === 'number' && cv && cv.exceptionFromPtr)
-  ? cv.exceptionFromPtr(e).msg : (e && e.message) || String(e);
+const errText = (cv, e) => {
+  const m = (typeof e === 'number' && cv && cv.exceptionFromPtr) ? cv.exceptionFromPtr(e).msg : (e && e.message) || String(e);
+  // Chrome's words when the site's storage allowance runs out
+  return /No space available|QuotaExceeded|quota/i.test(m)
+    ? 'The phone ran out of storage for this stack. Free some space (or untick High detail, or stack fewer photos), then try again. (' + m + ')'
+    : m;
+};
 
 /** the ArrayBuffers in a result, to hand over without copying */
 function transferables(o, out = []) {

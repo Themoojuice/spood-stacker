@@ -98,7 +98,14 @@ function headerSize(u8) {
 
 /** Where the engine parks its big per-photo images while it isn't using them: a scratch file
     in the site's private storage on the phone (OPFS), read and written in place, so they cost
-    no RAM. Falls back to memory, image by image, if the file can't be used or fills up. */
+    no RAM. Falls back to memory, image by image, if the file can't be used or fills up.
+    The file is sized once, up front (reserve), before any helper opens it, and keeps that size
+    while they have it open (lock). Chrome bills every handle on the file for any growth that
+    happens while it is open: helpers that opened an empty file and then wrote into it as it grew
+    were each billed for the whole file (about 2 GB each for 21 photos at 12 MP), so a stack
+    needed several times its real size in free storage, and the bills stayed until Chrome was
+    closed. Measured in Chrome 153: 4 helpers, a 1.4 GB file -> 5.8 GB still counted as used after
+    the file was deleted; sized up front -> nothing left over. */
 async function scratchStore(shared) {
   let root, name, ah;
   try {
@@ -113,30 +120,40 @@ async function scratchStore(shared) {
     try { ah = shared ? await fh.createSyncAccessHandle({ mode: 'readwrite-unsafe' }) : null; } catch (e) { ah = null; }
     if (!ah) ah = await fh.createSyncAccessHandle();
   } catch (e) { return null; }
-  let end = 0, onDisk = 0, inMemory = 0;
+  let end = 0, size = 0, cap = Infinity, reserved = 0, onDisk = 0, inMemory = 0;
   const free = new Map();                                        // size -> offsets of dropped images
+  const keep = (len, u) => { inMemory += len; return { mem: u, len }; };   // in memory instead (tasks with these run here, not on helpers)
   return {
     name, shareable: ah.mode === 'readwrite-unsafe',
     sync() { ah.flush(); },
+    /** make the file this big now (false if the phone hasn't the room) */
+    reserve(bytes) {
+      if (bytes <= size) return true;
+      try { ah.truncate(bytes); ah.flush(); size = reserved = bytes; return true; } catch (e) { try { ah.truncate(size); } catch (e2) { /* ignore */ } return false; }
+    },
+    /** helpers are about to open the file: it keeps its size from now on (what doesn't fit stays in memory) */
+    lock() { cap = size; },
     put(u, temp) {                                               // temp: a view into the WASM heap
       const len = u.length, spare = free.get(len);
       const at = spare && spare.length ? spare.pop() : end;
+      if (at === end && end + len > cap) return keep(len, temp ? u.slice() : u);
       try {
         if (ah.write(u, { at }) !== len) throw new Error('short write');
-        if (at === end) end += len;
+        if (at === end) { end += len; size = Math.max(size, end); }
         onDisk += len;
         return { at, len };
       } catch (e) {
         if (at !== end) spare.push(at);
-        inMemory += len;
-        return { mem: temp ? u.slice() : u, len };               // storage full: keep this one in memory
+        return keep(len, temp ? u.slice() : u);                  // storage full: keep this one in memory
       }
     },
     /** room for an image that will be written a band at a time (set) */
     alloc(len) {
       const spare = free.get(len);
       if (spare && spare.length) { onDisk += len; return { at: spare.pop(), len }; }
-      try { ah.truncate(end + len); } catch (e) { inMemory += len; return { mem: new Uint8Array(len), len }; }   // storage full
+      if (end + len > cap) return keep(len, new Uint8Array(len));
+      // (never shrink a file that was sized up front)
+      if (end + len > size) { try { ah.truncate(end + len); size = end + len; } catch (e) { return keep(len, new Uint8Array(len)); } }   // storage full
       const at = end; end += len; onDisk += len;
       return { at, len };
     },
@@ -161,13 +178,19 @@ async function scratchStore(shared) {
       if (!free.has(h.len)) free.set(h.len, []);
       free.get(h.len).push(h.at); onDisk -= h.len;
     },
-    stats: () => ({ fileMiB: Math.round(end / 1048576), inMemoryMiB: Math.round(inMemory / 1048576) }),
+    stats: () => ({ fileMiB: Math.round(end / 1048576), reservedMiB: Math.round(reserved / 1048576), inMemoryMiB: Math.round(inMemory / 1048576) }),
     async close() {
       try { ah.truncate(0); ah.close(); } catch (e) { /* ignore */ }
       try { await root.removeEntry(name); } catch (e) { /* ignore */ }
     }
   };
 }
+
+/** room left for this site's storage on the phone, MiB (null if the browser won't say) */
+async function storageRoomMiB() {
+  try { const e = await navigator.storage.estimate(); return Math.max(0, Math.floor((e.quota - e.usage) / 1048576)); } catch (e) { return null; }
+}
+const gb = mib => (mib / 1024).toFixed(1) + ' GB';
 
 self.onmessage = async ev => {
   const cv = await cvReady;
@@ -179,12 +202,44 @@ self.onmessage = async ev => {
   const wantHelpers = pool && pool.size > 0 && !opts.noHelpers;
   const maxHelpers = opts.maxHelpers === undefined ? Infinity : opts.maxHelpers;
   const store = await scratchStore(wantHelpers);
-  const helpers = wantHelpers && store && store.shareable ? Math.min(pool.size, maxHelpers) : 0;
+  let helpers = wantHelpers && store && store.shareable ? Math.min(pool.size, maxHelpers) : 0;
   try {
     const native = [];
     for (const f of files) native.push(await imageSize(f));
     // the largest working size whose memory need fits (the engine knows its own appetite)
-    const plan = self.SalticidStacker.planSize(native, { maxSide: opts.maxSide, lowMemory: opts.lowMemory, heapCapMiB: CV_BUILD.heapCapMiB, helpers });
+    const planFor = (maxSide, k) => self.SalticidStacker.planSize(native, { maxSide, lowMemory: opts.lowMemory, heapCapMiB: CV_BUILD.heapCapMiB, helpers: k });
+    let plan = planFor(opts.maxSide, helpers);
+    if (store) {
+      // the scratch file, sized before any helper opens it (see scratchStore)
+      const needFor = p => self.SalticidStacker.scratchNeedMiB(files.length, p.width, p.height);
+      let need = needFor(plan);
+      const room = await storageRoomMiB();
+      if (!store.reserve(need * 1048576)) {
+        // not enough room on the phone: the largest working size whose file Chrome will set aside.
+        // A first guess from the room Chrome reports (the need goes with the pixels), then smaller
+        // steps; asking is quick, and a refusal costs nothing.
+        const full = need;
+        let f = Math.min(0.94, room ? Math.sqrt(Math.max(0, room * 0.9 - 96) / Math.max(1, need - 96)) : 1);
+        while (plan.side * f >= 1200) {
+          const smaller = planFor(Math.floor(plan.side * f), helpers);
+          if (store.reserve(needFor(smaller) * 1048576)) {
+            plan = Object.assign(smaller, { shrunk: true, storageShrunk: true, storageNeedMiB: full });
+            need = needFor(plan);
+            break;
+          }
+          f *= 0.85;
+        }
+        if (plan.storageShrunk) postMessage({ type: 'log', m: `phone storage nearly full: full size needs about ${gb(full)} for a moment, ${gb(need)} could be set aside, so stacking at ${plan.width}×${plan.height}` });
+        else {
+          // still no room: one core, the file grows as it goes, and what doesn't fit is kept in memory
+          postMessage({ type: 'log', m: `phone storage nearly full (about ${gb(full)} needed): one core, some photos kept in memory` });
+          if (helpers) { helpers = 0; plan = planFor(opts.maxSide, 0); }
+          plan.storageLow = true; plan.storageNeedMiB = full;
+        }
+      }
+      if (helpers) store.lock();
+      if (store.stats().reservedMiB) postMessage({ type: 'log', m: `scratch storage: ${gb(store.stats().reservedMiB)} set aside` + (room !== null ? ` (Chrome reports ${gb(room)} free for the app)` : '') });
+    }
     postMessage({ type: 'plan', plan });
     postMessage({ type: 'log', m: store ? 'parking photos in scratch storage on the phone' : 'parking photos in memory' });
     postMessage({ type: 'log', m: helpers ? `working on ${helpers} cores at once` : 'working on one core' });
@@ -211,7 +266,7 @@ self.onmessage = async ev => {
       } : null, encodeFrames: true
     }));
     if (helpers) postMessage({ type: 'log', m: `memory: main ${Math.round(cv.HEAP8.length / 1048576)} MB, helpers ${[...pool.heaps.values()].map(h => Math.round(h / 1048576)).join(' + ')} MB` });
-    if (store) { const st = store.stats(); postMessage({ type: 'log', m: `scratch storage used: ${st.fileMiB} MB` + (st.inMemoryMiB ? ` (+${st.inMemoryMiB} MB kept in memory)` : '') }); }
+    if (store) { const st = store.stats(); postMessage({ type: 'log', m: `scratch storage used: ${st.fileMiB} MB of ${st.reservedMiB} MB set aside` + (st.inMemoryMiB ? ` (+${st.inMemoryMiB} MB kept in memory)` : '') }); }
     postMessage({ type: 'done', out }, [out.data.buffer]);
   } catch (e) {
     postMessage({ type: 'error', message: errText(cv, e) });

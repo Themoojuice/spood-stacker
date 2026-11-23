@@ -94,6 +94,10 @@
     const need = Math.max(stages, mergeNeedMiB(n, W, H, stripRows || H));
     return { need: need * 1.06, stripRows };
   }
+  /** How big the scratch file grows (MiB) for n photos at W x H: every photo's lined-up copy,
+      its grey, mask and maps stay parked until the merge. Measured 8.25 bytes a pixel a photo
+      (12 MP: about 95 MiB a photo); this allows 9, plus a fixed margin. */
+  function scratchNeedMiB(n, W, H) { return Math.ceil(n * W * H * 9 / 1048576) + 96; }
   /** The working size (long side) to stack at: the photos' own size, or opts.maxSide if
       smaller, stepped down until the memory need fits. native: [{width, height}].
       opts.lowMemory: a phone with 4 GB or less. opts.heapCapMiB: the OpenCV.js build's ceiling. */
@@ -2492,7 +2496,7 @@
 
   /** for helper workers: run tasks against their own handle on the shared scratch storage */
   function useStore(store) { STORE = store || MEM_STORE; }
-  const api = { stackFrames, planSize, heapNeedMiB, tasks, useStore, refCacheFree };
+  const api = { stackFrames, planSize, heapNeedMiB, scratchNeedMiB, tasks, useStore, refCacheFree };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SalticidStacker = api;
 })(typeof self !== 'undefined' ? self : this);
