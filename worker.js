@@ -123,13 +123,21 @@ async function scratchStore(shared) {
   let end = 0, size = 0, cap = Infinity, reserved = 0, onDisk = 0, inMemory = 0;
   const free = new Map();                                        // size -> offsets of dropped images
   const keep = (len, u) => { inMemory += len; return { mem: u, len }; };   // in memory instead (tasks with these run here, not on helpers)
+  // make the file at least `to` bytes long. A private (incognito) window keeps the file in memory
+  // and ignores truncate past the end, and its helpers only see what was in the file when they
+  // opened it: there the length is made by writing the last byte instead.
+  const grow = to => {
+    ah.truncate(to);
+    if (ah.getSize() < to) { if (ah.write(new Uint8Array(1), { at: to - 1 }) !== 1) throw new Error('short write'); }
+    if (ah.getSize() < to) throw new Error('could not size the scratch file');
+  };
   return {
     name, shareable: ah.mode === 'readwrite-unsafe',
     sync() { ah.flush(); },
     /** make the file this big now (false if the phone hasn't the room) */
     reserve(bytes) {
       if (bytes <= size) return true;
-      try { ah.truncate(bytes); ah.flush(); size = reserved = bytes; return true; } catch (e) { try { ah.truncate(size); } catch (e2) { /* ignore */ } return false; }
+      try { grow(bytes); ah.flush(); size = reserved = bytes; return true; } catch (e) { try { ah.truncate(size); } catch (e2) { /* ignore */ } return false; }
     },
     /** helpers are about to open the file: it keeps its size from now on (what doesn't fit stays in memory) */
     lock() { cap = size; },
@@ -153,7 +161,7 @@ async function scratchStore(shared) {
       if (spare && spare.length) { onDisk += len; return { at: spare.pop(), len }; }
       if (end + len > cap) return keep(len, new Uint8Array(len));
       // (never shrink a file that was sized up front)
-      if (end + len > size) { try { ah.truncate(end + len); size = end + len; } catch (e) { return keep(len, new Uint8Array(len)); } }   // storage full
+      if (end + len > size) { try { grow(end + len); size = end + len; } catch (e) { return keep(len, new Uint8Array(len)); } }   // storage full
       const at = end; end += len; onDisk += len;
       return { at, len };
     },

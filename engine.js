@@ -17,6 +17,9 @@
          glare when judging movement, keep photos whose features line up well even when the
          fine-tune disagrees, and prefer a photo without glare where another has it (see
          tameShine).
+         eggs: backlit translucent eggs - take the lamp's colour out, set white and black
+         points from the picture, and add local contrast through the milky veil, the same
+         way on the stack and every retouch copy (see eggPrep).
          onPeek(name, data) - optional, for the "watch the maths" view: small, read-only previews of
          each stage as it happens ('photo', 'order', 'features', 'match', 'aligned', 'flow',
          'winners', 'box', 'strip'; see peekThumb and the calls in run()). Off: nothing extra is
@@ -315,13 +318,13 @@
     });
     fjobs.forEach((j, k) => {
       const cur = j.cur, r = fres[k];
-      if (r.accepted) {
-        STORE.drop(warped[cur].h); STORE.drop(wg[cur].h); STORE.drop(wmask[cur].h);
-        warped[cur] = parkData(r.rgb, H, W, cv.CV_8UC3, 3); wg[cur] = parkData(r.g8, H, W, cv.CV_8U, 1); wmask[cur] = parkData(r.m8, H, W, cv.CV_8U, 1);
-        say(`photo ${cur + 1}: local correction on ${Math.max(1, Math.round(r.share * 100))}% of it (${r.nccG.toFixed(3)} → ${r.nccF.toFixed(3)})`);
-      } else say(`photo ${cur + 1}: local correction not needed`);
+      // (a corrected photo was written over its parked copies by the job itself)
+      if (r.accepted) say(`photo ${cur + 1}: local correction on ${Math.max(1, Math.round(r.share * 100))}% of it (${r.nccG.toFixed(3)} → ${r.nccF.toFixed(3)})`);
+      else say(`photo ${cur + 1}: local correction not needed`);
       trust[cur] = parkData(r.trust, hh, hw, cv.CV_8U, 1);   // 8-bit, parked
+      r.trust = null;
     });
+    fres.length = 0;                                      // (results were kept to the end of the stack)
     trust[ref] = park(cv, new cv.Mat(hh, hw, cv.CV_8U, new cv.Scalar(255)));
     if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(pdata(g), v => v / 255)), trust: trust.map(t => Float32Array.from(pdata(t), v => v / 255)), hw, hh });
 
@@ -413,6 +416,9 @@
     const seen = unpark(cv, wmask[idx[0]]);
     for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
     const box = largestRect(cv, seen); seen.delete();
+    // backlit eggs: the finish's numbers, from the reference photo, for the stack and every retouch copy
+    const egg = opts.eggs ? eggPrepFrom(cv, warped[ref], box) : null;
+    if (egg) say(`backlit eggs: lamp colour taken out (×${egg.gain.map(g => g.toFixed(2)).join(' ')}), levels ${Math.round(egg.lo)}–${Math.round(egg.hi)}`);
     if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1), left: left.map(i => ({ i, why: why[i] })),
       best: sharp && warped[sharp.best] ? { i: sharp.best, img: peekCrop(cv, warped[sharp.best], box, W, Math.min(720, box.w)) } : null });
 
@@ -421,7 +427,7 @@
     // Photos that could not be lined up are not offered.
     if (opts.onFrame) {
       const offer = [...Array(n).keys()].filter(i => keep[i] || !/lined up/.test(why[i]));
-      const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, sharpen: SHARPEN, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
+      const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, sharpen: SHARPEN, egg, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
       // handed on in order, each as soon as it and those before it are ready
       const ready = new Array(ejobs.length); let next = 0, chain = Promise.resolve();
       await each('exportFrame', ejobs, (k, fr, j) => {
@@ -451,6 +457,7 @@
         for (let x = 0; x < box.w; x++, q += 3, d += 4) { data[d] = rgb[q]; data[d + 1] = rgb[q + 1]; data[d + 2] = rgb[q + 2]; data[d + 3] = 255; }
       }
       out = { data, width: box.w, height: box.h, log, ref: ref + 1 };
+      if (egg) eggFinish(out.data, out.width, out.height, 4, egg);
     } else {
     const wMats = weights.map(p => unpark(cv, p)); unparkAll(weights);
     const fused = await fuseHybrid(cv, keptImgs, wMats, keptMask, p => progress(at('merge', p * 0.95), 'Merging'), tick, debug);
@@ -463,6 +470,7 @@
     const rgba = new cv.Mat(); cv.cvtColor(u8, rgba, cv.COLOR_RGB2RGBA); u8.delete();
     out = { data: new Uint8ClampedArray(rgba.data), width: rgba.cols, height: rgba.rows, log, ref: ref + 1 };
     rgba.delete();
+    if (egg) eggFinish(out.data, out.width, out.height, 4, egg);
     if (peek) { const sw = Math.min(720, W); peek('strip', { W, H, y0: box.y, y1: box.y + box.h, x0: box.x, w: box.w, rgba: true, data: peekRows(out.data, out.width, 0, out.height, 4, sw * out.width / W) }); }
     }
     unparkAll(warped); unparkAll(wmask); unparkAll(wg);
@@ -1976,6 +1984,127 @@
     return out;
   }
 
+  /* ---------- backlit eggs (opts.eggs) ----------
+     Translucent eggs lit from behind are seen through a milky veil of scattered light, tinted by
+     the lamp, with the detail that matters (eye spots, the embryo's outline and segments) only a
+     few levels deep. The finish, worked out once from the reference photo and applied the same
+     way to the stack and to every retouch copy (so painted pixels still match):
+       - the lamp's colour is taken out: the brightest unclipped, least coloured pixels are light
+         straight through the silk, so they should be neutral;
+       - white and black points from the picture itself, so every day's stack comes out alike
+         whatever the phone's exposure did;
+       - local contrast at about 1/80 of the frame, on brightness only (in log space, so it is
+         contrast that grows, not brightness), held back on the lamp itself and in deep shadow. */
+  const EGG_WB = 0.8;            // how much of the lamp's tint is taken out (all of it overshoots to green)
+  const EGG_CLARITY = 0.55;      // local contrast gain
+  const EGG_RADIUS = 1 / 80;     // its reach, as a share of the frame's long side
+  const EGG_GRID = 8;            // the smooth brightness map is kept at 1/8 size
+  /** The finish's numbers, from an RGB copy (rows of 3 bytes) of the frame at 1/q size (W x H is
+      the full frame): the lamp's colour, the white and black points, and the smooth
+      log-brightness map the local contrast is measured against. */
+  function eggPrep(rgb, w, h, q, W, H) {
+    const s = EGG_GRID, gw = Math.ceil(W / s), gh = Math.ceil(H / s), st = Math.max(1, Math.round(4 / q));
+    // pass 1, every 4th pixel: brightness and colourfulness inside the circle of light
+    const lumH = new Uint32Array(1024), satH = new Uint32Array(256);
+    let inside = 0;
+    for (let y = 0; y < h; y += st) for (let x = 0; x < w; x += st) {
+      const o = (y * w + x) * 3, r = rgb[o], g = rgb[o + 1], b = rgb[o + 2];
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (l < 38) continue;                                      // the dark ring outside the lens's circle
+      inside++; lumH[Math.min(1023, l * 4 | 0)]++; satH[Math.max(r, g, b) - Math.min(r, g, b)]++;
+    }
+    const pct = (h, p, scale) => { let a = 0, t = p * inside; for (let k = 0; k < h.length; k++) { a += h[k]; if (a >= t) return k / scale; } return (h.length - 1) / scale; };
+    const satMax = pct(satH, 0.6, 1), lumCut = (() => {
+      // the brightest 8% of the unclipped, low-colour pixels: light straight through the silk
+      const hh = new Uint32Array(1024); let m = 0;
+      for (let y = 0; y < h; y += st) for (let x = 0; x < w; x += st) {
+        const o = (y * w + x) * 3, r = rgb[o], g = rgb[o + 1], b = rgb[o + 2], mx = Math.max(r, g, b);
+        const l = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (l < 38 || mx >= 251 || mx - Math.min(r, g, b) > satMax) continue;
+        hh[Math.min(1023, l * 4 | 0)]++; m++;
+      }
+      let a = 0; for (let k = 1023; k >= 0; k--) { a += hh[k]; if (a >= 0.08 * m) return k / 4; }
+      return 255;
+    })();
+    let sr = 0, sg = 0, sb = 0, sn = 0;
+    for (let y = 0; y < h; y += st) for (let x = 0; x < w; x += st) {
+      const o = (y * w + x) * 3, r = rgb[o], g = rgb[o + 1], b = rgb[o + 2], mx = Math.max(r, g, b);
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (l < lumCut || mx >= 251 || mx - Math.min(r, g, b) > satMax) continue;
+      sr += r; sg += g; sb += b; sn++;
+    }
+    const lamp = sn ? [sr / sn, sg / sn, sb / sn] : [1, 1, 1], lm = (lamp[0] + lamp[1] + lamp[2]) / 3;
+    const gain = lamp.map(c => Math.pow(lm / Math.max(1, c), EGG_WB));
+    // white and black points, after the lamp's colour is taken out
+    const gl = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2];   // (brightness scales by about this)
+    const lo = Math.max(0, pct(lumH, 0.005, 4) * gl), hi = Math.min(255 * 1.2, Math.max(lo + 20, pct(lumH, 0.995, 4) * gl));
+    // the smooth log-brightness map, at 1/8 size, of the levelled picture
+    const k = 0.97 * 255 / (hi - lo), grid = new Float32Array(gw * gh), cnt = new Float32Array(gw * gh);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 3;
+      const l = Math.max(0.25, (0.299 * rgb[o] * gain[0] + 0.587 * rgb[o + 1] * gain[1] + 0.114 * rgb[o + 2] * gain[2] - lo) * k);
+      const c = Math.min(gh - 1, (y * q / s) | 0) * gw + Math.min(gw - 1, (x * q / s) | 0); grid[c] += Math.log(l); cnt[c]++;
+    }
+    for (let c = 0; c < grid.length; c++) grid[c] = cnt[c] ? grid[c] / cnt[c] : 0;
+    blurGrid(grid, gw, gh, Math.max(1, EGG_RADIUS * Math.max(W, H) / s));
+    return { gain, lo, hi, gw, gh, s, grid, W, H };
+  }
+  /** a Gaussian-like blur of a small float map in place: three box passes each way */
+  function blurGrid(a, w, h, sigma) {
+    const r = Math.max(1, Math.round(Math.sqrt(12 * sigma * sigma / 3 + 1) / 2 - 0.5));
+    const tmp = new Float32Array(Math.max(w, h));
+    const pass = (n, get, set) => {
+      for (let it = 0; it < 3; it++) {
+        for (let i = 0; i < n; i++) tmp[i] = get(i);
+        let acc = 0;
+        for (let i = -r; i <= r; i++) acc += tmp[Math.min(n - 1, Math.max(0, i))];
+        for (let i = 0; i < n; i++) {
+          set(i, acc / (2 * r + 1));
+          acc += tmp[Math.min(n - 1, i + r + 1)] - tmp[Math.max(0, i - r)];
+        }
+      }
+    };
+    for (let y = 0; y < h; y++) pass(w, i => a[y * w + i], (i, v) => { a[y * w + i] = v; });
+    for (let x = 0; x < w; x++) pass(h, i => a[i * w + x], (i, v) => { a[i * w + x] = v; });
+  }
+  /** The finish, in place, on pixels of the frame the prep was made for (or a crop of it at x0, y0):
+      ch = 3 (RGB) or 4 (RGBA, alpha untouched); d must be a Uint8ClampedArray (it clamps and rounds).
+      Pure per-pixel arithmetic plus the shared map, so a crop comes out exactly as the same pixels
+      would in the whole frame. */
+  function eggFinish(d, w, h, ch, prep, x0 = 0, y0 = 0) {
+    const { gain, lo, hi, gw, gh, s, grid } = prep, k = 0.97 / (hi - lo);
+    const gr = gain[0] * k, gg = gain[1] * k, gb = gain[2] * k, lk = lo * k;
+    for (let y = 0; y < h; y++) {
+      const fy = Math.min(gh - 1, Math.max(0, (y + y0 + 0.5) / s - 0.5)), j0 = fy | 0, j1 = Math.min(gh - 1, j0 + 1), wy = fy - j0;
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * ch;
+        let r = d[o] * gr - lk, g = d[o + 1] * gg - lk, b = d[o + 2] * gb - lk;       // 0..~1
+        const l = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (l > 0.001) {
+          const fx = Math.min(gw - 1, Math.max(0, (x + x0 + 0.5) / s - 0.5)), i0 = fx | 0, i1 = Math.min(gw - 1, i0 + 1), wx = fx - i0;
+          const base = (grid[j0 * gw + i0] * (1 - wx) + grid[j0 * gw + i1] * wx) * (1 - wy) + (grid[j1 * gw + i0] * (1 - wx) + grid[j1 * gw + i1] * wx) * wy;
+          const L = Math.log(l * 255);                                                  // the map is in 0..255 log units
+          const wt = Math.min(1, Math.max(0, (0.97 - l) / 0.25)) * Math.min(1, l / 0.1);
+          const m = Math.exp(EGG_CLARITY * (L - base) * wt);
+          r *= m; g *= m; b *= m;
+        }
+        d[o] = r * 255; d[o + 1] = g * 255; d[o + 2] = b * 255;                       // (clamped by the typed array if Uint8Clamped)
+      }
+    }
+  }
+  /** The finish's numbers for a stack: from the reference photo, lined up and cropped to the box
+      (read a band at a time at half size). */
+  function eggPrepFrom(cv, img, box) {
+    const hw = Math.ceil(box.w / 2), hh = Math.ceil(box.h / 2), half = new Uint8Array(hw * hh * 3);
+    for (let y0 = 0; y0 < box.h; y0 += BAND) {
+      const y1 = Math.min(box.h, y0 + BAND), rows = unpark(cv, img, box.y + y0, box.y + y1);
+      const c = rows.roi(new cv.Rect(box.x, 0, box.w, y1 - y0)), r = new cv.Mat();
+      cv.resize(c, r, new cv.Size(hw, Math.ceil((y1 - y0) / 2)), 0, 0, cv.INTER_AREA); c.delete(); rows.delete();
+      half.set(r.data.subarray(0, Math.min(r.data.length, half.length - (y0 / 2) * hw * 3)), (y0 / 2) * hw * 3); r.delete();
+    }
+    return eggPrep(half, hw, hh, 2, box.w, box.h);
+  }
+
   /* ---------- "watch the maths" previews (opts.onPeek) ----------
      Small, read-only copies of what each stage works with, for the page to animate. Only made
      when someone is watching; nothing here feeds back into the stack. */
@@ -2295,16 +2424,18 @@
       }
       if (candG && nccF >= nccG + 0.002) {
         res.accepted = true;
-        const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); res.g8 = new Uint8Array(g8.data); g8.delete();
+        // The corrected grey, photo and mask are written straight over this photo's own parked
+        // copies (each was read in full above, and no other job touches them), not sent back:
+        // 57 MB a 12 MP photo that would sit in the engine's worker until it was parked.
+        const g8 = new cv.Mat(); candG.convertTo(g8, cv.CV_8U, 255); parkRows(a.wg, 0, g8); g8.delete();
         candG.delete(); candG = null;                     // before the photo and its mask come in
         // the photo and its mask through the same correction, sharing each band's maps
         const wsrc = unpark(cv, a.img), mf = new cv.Mat(); wmCur.convertTo(mf, cv.CV_32F);
-        res.rgb = new Uint8Array(W * H * 3); res.m8 = new Uint8Array(W * H);
         field.remap(cv, [
-          { src: wsrc, interp: cv.INTER_LANCZOS4, sink: (y0, m) => res.rgb.set(m.data, y0 * W * 3) },
+          { src: wsrc, interp: cv.INTER_LANCZOS4, sink: (y0, m) => parkRows(a.img, y0, m) },
           { src: mf, interp: cv.INTER_LINEAR, sink: (y0, mr) => {
             const mb = new cv.Mat(); cv.threshold(mr, mb, 0.5, 1, cv.THRESH_BINARY);
-            const b8 = new cv.Mat(); mb.convertTo(b8, cv.CV_8U); mb.delete(); res.m8.set(b8.data, y0 * W); b8.delete();
+            const b8 = new cv.Mat(); mb.convertTo(b8, cv.CV_8U); mb.delete(); parkRows(a.wm, y0, b8); b8.delete();
           } }]);
         wsrc.delete(); mf.delete();
       }
@@ -2358,6 +2489,7 @@
     exportFrame(cv, a) {
       const u8 = unpark(cv, a.usable), uF = f32(cv, u8); u8.delete();
       const fr = exportFrame(cv, a.img, a.g8, uF, a.box, a.info, a.sharpen); uF.delete();
+      if (a.egg) eggFinish(fr.data, fr.width, fr.height, 4, a.egg);   // finished like the stack
       return fr;
     },
     /** one photo's sharpest fine detail at every 7th pixel (texture thresholds for the merge) */

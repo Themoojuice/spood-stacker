@@ -26,7 +26,7 @@ onmessage = async e => {
       self.SalticidStacker.refCacheFree();
     } else {
       result = await self.SalticidStacker.tasks[m.name](cv, m.args, f => postMessage({ id: m.id, progress: f }));
-      if (m.name === 'warp') ah.flush();          // written straight into the scratch file
+      if (m.name === 'warp' || m.name === 'flow') ah.flush();   // written straight into the scratch file
       if (m.name === 'exportFrame' && m.args.encode && typeof OffscreenCanvas !== 'undefined') result = await encodeFrame(result);
     }
     postMessage({ id: m.id, result, heap: cv.HEAP8.length }, transferables(result));

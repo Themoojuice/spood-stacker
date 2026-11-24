@@ -64,6 +64,16 @@ button:focus-visible, .btn:focus-visible { outline: 3px solid var(--accent); out
 label.opt { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: .95rem; }
 label.opt input { width: 18px; height: 18px; accent-color: var(--accent); }
 .count { font-family: var(--font-mono); font-size: .9rem; color: var(--muted); }
+/* what's being stacked: three pills, remembered */
+.subject { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 0; padding: 0; margin: 0; }
+.subject legend { color: var(--muted); font-size: .9rem; padding: 0; margin-bottom: 6px; }
+.subject label { position: relative; }
+.subject input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.subject b { display: inline-block; padding: 10px 15px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); font-size: .95rem; }
+.subject input:checked + b { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.subject input:focus-visible + b { outline: 3px solid var(--accent); outline-offset: 2px; }
+.subject .note { flex-basis: 100%; }
+.mode-note { color: var(--accent); font-weight: 700; font-size: .92rem; margin: 0; }
 
 /* working */
 .working { align-items: center; text-align: center; padding-block: 28px; }
@@ -164,6 +174,13 @@ body.rt-open { overflow: hidden; }
       <small>or share them here from Gallery · 2–30 photos of the same subject</small>
       <input type="file" id="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="Choose photos">
     </div>
+    <fieldset class="subject" id="subject">
+      <legend>What are you stacking?</legend>
+      <label><input type="radio" name="subject" value="normal" checked><b>Spider or bug</b></label>
+      <label><input type="radio" name="subject" value="tame"><b>Wet or shiny</b></label>
+      <label><input type="radio" name="subject" value="eggs"><b>Backlit eggs</b></label>
+      <p class="note" id="subjectNote"></p>
+    </fieldset>
   </section>
 
   <section id="chosen" class="panel" hidden>
@@ -175,7 +192,6 @@ body.rt-open { overflow: hidden; }
     </div>
     <label class="opt"><input type="checkbox" id="hi" checked> Full detail: as sharp as the photos allow (slower; untick for a quicker, smaller stack)</label>
     <label class="opt"><input type="checkbox" id="bgKeep"> Keep stacking if I switch apps (experimental: plays a near-silent hum and shows progress in your notifications)</label>
-    <label class="opt"><input type="checkbox" id="tame"> Wet or shiny subject: work around glare and light that changed between photos (keeps photos the stacker would otherwise leave out)</label>
   </section>
 
   <section id="work" class="panel working" hidden aria-live="polite">
@@ -190,11 +206,13 @@ body.rt-open { overflow: hidden; }
     <div class="stage" id="stage">Starting</div>
     <div class="bar" role="progressbar" aria-labelledby="stage" aria-valuemin="0" aria-valuemax="100" id="bar"><i id="fill"></i></div>
     <div class="pct" id="pct">0%</div>
+    <p class="mode-note" id="modeNote" hidden></p>
     <p class="note" id="eta">Keep this screen open. Nothing leaves your phone.</p>
     <div class="row work-links">
       <button class="linkbtn" id="mathsToggle" type="button">Hide the maths</button>
       <button class="linkbtn" id="popOut" type="button" hidden>Pop out</button>
       <button class="linkbtn" id="bgNow" type="button" hidden>Keep going if I switch apps</button>
+      <button class="linkbtn" id="stopBtn" type="button">Stop</button>
     </div>
     <details><summary>Details</summary><pre class="log" id="log"></pre></details>
   </section>
@@ -274,7 +292,7 @@ body.rt-open { overflow: hidden; }
 (() => {
   const $ = id => document.getElementById(id);
   const S = { pick: $('pick'), chosen: $('chosen'), work: $('work'), done: $('done') };
-  let files = [], lastTame = false, busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
+  let files = [], lastTame = false, lastSubject = 'normal', busy = false, worker = null, ready = false, result = null, t0 = 0, wake = null;
   // basePixels: the stack (with any retouching) before the final sharpening; autoBase: the
   // automatic stack, the retouch editor's "Stack" source
   let rtFrames = [], basePixels = null, autoBase = null, refPhoto = 0;
@@ -309,6 +327,23 @@ body.rt-open { overflow: hidden; }
     worker.onerror = e => { e.preventDefault(); if (!ready) engineStatus('could not start. Reload the app.'); else fail(e.message || 'The stacking engine stopped.'); };
   }
   startWorker();
+
+  // ---------- what's being stacked (remembered; photos shared from Gallery are stacked this way too) ----------
+  const SUBJECT_TAG = { normal: '', tame: 'wet/shiny subject mode', eggs: 'backlit eggs mode' };
+  const SUBJECT_NOTE = {
+    normal: 'The usual. Remembered, and used for photos you share from Gallery too.',
+    tame: 'Works around glare and light that changed between photos, and keeps photos the stacker would otherwise leave out. Remembered, and used for photos shared from Gallery.',
+    eggs: 'For translucent eggs lit from behind: takes out the lamp\'s tint and the milky haze, and brings up eye spots and the embryo\'s outline, the same way every day. Remembered, and used for photos shared from Gallery.'
+  };
+  const subject = () => (document.querySelector('input[name=subject]:checked') || {}).value || 'normal';
+  function setSubject(v, remember) {
+    const r = document.querySelector(`input[name=subject][value="${v}"]`) || document.querySelector('input[name=subject][value=normal]');
+    r.checked = true; $('subjectNote').textContent = SUBJECT_NOTE[r.value];
+    if (remember) try { localStorage.setItem('spood-subject', r.value); } catch (e) { /* private mode */ }
+  }
+  const savedSubject = () => { try { return localStorage.getItem('spood-subject') || 'normal'; } catch (e) { return 'normal'; } };
+  setSubject(savedSubject(), false);
+  document.querySelectorAll('input[name=subject]').forEach(r => r.addEventListener('change', () => setSubject(subject(), true)));
 
   // ---------- photos shared from Gallery ----------
   let autoStart = false;
@@ -416,7 +451,7 @@ body.rt-open { overflow: hidden; }
   try { if (localStorage.getItem('spood-full-detail') === '0') $('hi').checked = false; } catch (e) { /* private mode */ }
   $('hi').addEventListener('change', () => { try { localStorage.setItem('spood-full-detail', $('hi').checked ? '1' : '0'); } catch (e) {} });
 
-  let lastSide = 0, retrySide = 0, plan = null, oneCore = false, lastHelpers = 0;
+  let lastSide = 0, retrySide = 0, plan = null, oneCore = false, retryCores = Infinity, lastHelpers = 0;
   // If a stack never finished (the browser closed the tab mid-stack, likely for memory), the
   // next ones use fewer cores at once: 2 helpers after one such stack, one core after two.
   // Only a stack that died while the app was ON SCREEN counts: Android closes background tabs
@@ -463,6 +498,7 @@ body.rt-open { overflow: hidden; }
     $('retouchBtn').hidden = true; $('metaNote').hidden = true; $('sizeNote').hidden = true;
     S.pick.hidden = true; S.chosen.hidden = true; S.done.hidden = true; S.work.hidden = false; $('install').hidden = true;
     if (!retrySide) $('log').textContent = ''; $('eta').textContent = 'Keep this screen open. Nothing leaves your phone.';
+    { const tag = SUBJECT_TAG[subject()]; $('modeNote').textContent = tag ? `Stacking in ${tag}` : ''; $('modeNote').hidden = !tag; $('stopBtn').hidden = false; }
     if (maths) maths.reset(files.length);
     dockMaths(false); $('mathsAfter').hidden = true; vnote('');
     showMaths();
@@ -472,7 +508,7 @@ body.rt-open { overflow: hidden; }
     const lowMem = (navigator.deviceMemory || 8) <= 4;
     // the engine picks the largest working size that fits in memory, up to this
     const maxSide = retrySide || ($('hi').checked ? Infinity : (lowMem ? 2400 : 3000));
-    if (!retrySide) oneCore = false;                     // a fresh stack tries all cores again
+    if (!retrySide) { oneCore = false; retryCores = Infinity; }   // a fresh stack tries all cores again
     retrySide = 0;
     try {
       // the files themselves go to the engine, which decodes each photo only when it gets to it
@@ -480,8 +516,8 @@ body.rt-open { overflow: hidden; }
       for (const f of files) taken.push(await takenOf(f));
       try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) { /* private mode */ }
       if (cutShort) log(`fewer cores: ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen`);
-      lastTame = $('tame').checked;
-      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: coresCap === Infinity ? undefined : coresCap, retouch: !!(window.SpoodRetouch && self.OffscreenCanvas), tame: lastTame, peek: !!maths && mathsOn } });
+      lastSubject = subject(); lastTame = lastSubject === 'tame';
+      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: Math.min(coresCap, retryCores) === Infinity ? undefined : Math.min(coresCap, retryCores), retouch: !!(window.SpoodRetouch && self.OffscreenCanvas), tame: lastTame, eggs: lastSubject === 'eggs', peek: !!maths && mathsOn } });
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -647,7 +683,7 @@ body.rt-open { overflow: hidden; }
     requestAnimationFrame(drawLoupe);
     $('retouchBtn').hidden = !(rtFrames.length && window.SpoodRetouch);
     $('tameBox').hidden = !!lastTame;                      // offered only after a stack made without it
-    if (lastTame) $('resultInfo').textContent += ' · wet/shiny subject mode';
+    if (SUBJECT_TAG[lastSubject]) $('resultInfo').textContent += ' · ' + SUBJECT_TAG[lastSubject];
     if (!reveal) save();
     $('mathsAfter').hidden = !(maths && maths.canReplay); $('shareVideo').hidden = true; vnote('');
     done();
@@ -734,6 +770,16 @@ body.rt-open { overflow: hidden; }
   }
   function fail(m) {
     const oom = /memory|alloc|abort|OOM/i.test(m);
+    if (oom && lastHelpers > 2 && !oneCore && lastSide) {
+      // several cores at once need more memory: first try again on half as many, at the same size
+      retryCores = Math.floor(lastHelpers / 2); retrySide = lastSide;
+      log(`Ran out of memory working on ${lastHelpers} cores; retrying on ${retryCores}`);
+      $('stage').textContent = `Needed more memory. Retrying on ${retryCores} cores…`;
+      busy = false;
+      if (worker) worker.terminate();
+      engineStatus('restarting…'); autoStart = true; startWorker();
+      return;
+    }
     if (oom && lastHelpers > 0 && !oneCore && lastSide) {
       // several cores at once need more memory: first try again on one, at the same size
       oneCore = true; retrySide = lastSide;
@@ -769,9 +815,17 @@ body.rt-open { overflow: hidden; }
   function done() {
     busy = false; refreshGo(); try { wake?.release(); localStorage.removeItem('spood-running'); } catch (e) {} wake = null;
     if (maths) maths.stop();
-    $('popOut').hidden = true; $('bgNow').hidden = true;
+    $('popOut').hidden = true; $('bgNow').hidden = true; $('stopBtn').hidden = true;
     if (self.SpoodKeepAlive) SpoodKeepAlive.stop();
   }
+  // stop a stack (to change the mode of one that started from the share sheet, say)
+  $('stopBtn').addEventListener('click', () => {
+    if (!busy) return;
+    retrySide = 0; autoStart = false;
+    done();
+    if (worker) { worker.terminate(); engineStatus('restarting…'); startWorker(); }
+    S.work.hidden = true; S.pick.hidden = false; renderChosen();
+  });
 
   $('save').addEventListener('click', save);
   $('share').addEventListener('click', async () => {
@@ -784,10 +838,10 @@ body.rt-open { overflow: hidden; }
     if (!rt.hidden) history.pushState({ rt: true }, '');
   });
   // the same photos once more, as a wet or shiny subject
-  $('tameAgain').addEventListener('click', () => { if (busy || files.length < 2) return; $('tame').checked = true; $('selection').hidden = true; delete $('selection').dataset.used; run(); });
+  $('tameAgain').addEventListener('click', () => { if (busy || files.length < 2) return; setSubject('tame', false); $('selection').hidden = true; delete $('selection').dataset.used; run(); });
   $('again').addEventListener('click', () => {
     files = []; rtFrames = []; basePixels = autoBase = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
-    $('tame').checked = false;                             // a new burst starts in the usual mode
+    setSubject(savedSubject(), false);                    // a new burst starts in the remembered mode
     $('selection').hidden = true; delete $('selection').dataset.used;
   });
   // ---------- clear temporary memory ----------
