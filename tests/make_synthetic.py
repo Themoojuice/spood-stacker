@@ -303,6 +303,16 @@ SCENES = {
     # at a phone's noise level in shade: what merging detail from several photos is for
     'dense': dict(n=16, f=(0.16, 0.66), lean=0.04, par=0.05, orient=1, seed=13, moved=None, noise=5.0,
                   legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # 25 handheld photos, fine focus steps: most add little the others lack (what the plan's
+    # selection is for: the stack should come from the few that carry the subject)
+    'dense25': dict(n=25, f=(0.16, 0.66), lean=0.04, par=0.05, orient=1, seed=41, moved=None, noise=3.5, drift=24,
+                    legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
+    # two bursts of one spider: the first sweeps the whole depth; then the spider shifts, the
+    # phone is reframed (turned ~5°) and a second burst sweeps only the far half. Taking the
+    # reference from the second burst throws away the only photos sharp at the front.
+    'twoburst': dict(n=10, f=(0.10, 0.70), lean=0.03, par=0.04, orient=1, seed=51, moved=(18, -12), two=(0.40, 0.70),
+                     legs=[(0.30, 0.10), (0.35, 0.70), (0.30, 0.15), (0.40, 0.75),
+                           (0.30, 0.08), (0.35, 0.68), (0.32, 0.12), (0.40, 0.72)]),
     # flash at night: black background all round the subject (must not be taken for the clamp)
     'night': dict(n=7, f=(0.14, 0.62), lean=0.05, par=0.06, orient=1, seed=17, moved=None, bg='night', drift=60,
                   legs=[(0.35, 0.55)] * 4 + [(0.30, 0.20)] * 4),
@@ -334,6 +344,15 @@ def make(name):
         focus = sc['f'][1] - (sc['f'][1] - sc['f'][0]) * k / (n - 1)       # lean in: far first, near last
         Mc = np.eye(3) if sc.get('still') else cam_motion(rng, k, n, sc['lean'], sc.get('drift', 18))
         src = moved if (moved is not None and k >= n - 2) else base
+        if sc.get('two'):                   # second burst: the spider shifted, reframed, far half only
+            h = n // 2
+            if k < h:
+                focus = sc['f'][1] - (sc['f'][1] - sc['f'][0]) * k / (h - 1); src = base
+            else:
+                f0, f1 = sc['two']; focus = f1 - (f1 - f0) * (k - h) / (n - h - 1); src = moved
+                a = math.radians(5.0); C = np.array([[1, 0, W / 2], [0, 1, H / 2], [0, 0, 1]], np.float64)
+                R = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+                Mc = np.array([[1, 0, 90], [0, 1, -60], [0, 0, 1]]) @ C @ R @ np.linalg.inv(C) @ Mc
         parts = [warp_part(bg, Mc @ parallax(np.float32(bg.depth.mean()), k, n, sc['par']))]
         for p in src:
             dm = float(p.depth[p.alpha > 0.5].mean()) if (p.alpha > 0.5).any() else 0.4
@@ -348,8 +367,9 @@ def make(name):
         o = sc['orient']
         if o == 6:                          # stored sideways; viewers rotate 90° clockwise
             pil = pil.transpose(Image.Transpose.ROTATE_90)
+        tk = k + (6 if sc.get('two') and k >= n // 2 else 0)
         pil.save(os.path.join(d, f'IMG_{k + 1:04d}.jpg'), 'JPEG', quality=93,
-                 exif=exif_bytes(k, pil.width, pil.height, o), icc_profile=icc)
+                 exif=exif_bytes(tk, pil.width, pil.height, o), icc_profile=icc)
         print(f'{name}: frame {k + 1}/{n}  focus {focus:.2f}', flush=True)
 
 
