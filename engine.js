@@ -11,15 +11,13 @@
          store: where big images are parked (see MEM_STORE); stripRows: merge in strips;
          pool: {size, limits, run(task, args, onProgress)} - helpers that run `tasks` side by
          side (only used when the store is shareable);
-         onFrame(frame) - optional; receives each lined-up photo cropped and finished
-         like the stack ({photo, used, why, ref, width, height, data, focus}) for retouching.
          tame: wet or shiny subject - relight each photo to the reference's lighting, look past
          glare when judging movement, keep photos whose features line up well even when the
          fine-tune disagrees, and prefer a photo without glare where another has it (see
          tameShine).
          eggs: backlit translucent eggs - take the lamp's colour out, set white and black
          points from the picture, and add local contrast through the milky veil, the same
-         way on the stack and every retouch copy (see eggPrep).
+         way on every stack (see eggPrep).
          onPeek(name, data) - optional, for the "watch the maths" view: small, read-only previews of
          each stage as it happens ('photo', 'order', 'features', 'match', 'aligned', 'flow',
          'winners', 'box', 'strip'; see peekThumb and the calls in run()). Off: nothing extra is
@@ -50,7 +48,7 @@
   const STRIP_JS_MIB = 512;                               // the merge's own (JS) buffers for one strip, at most
   /** Each stage's share of the run time, from measured costs (seconds per photo on a slow
       2-core machine with the SIMD build; mp = megapixels): at(stage, fraction done) -> 0..1. */
-  function progressPlan(n, W, H, stripRows, retouch, pool) {
+  function progressPlan(n, W, H, stripRows, pool) {
     const mp = W * H / 1e6, strips = stripRows ? stripRows / Math.max(1, stripRows - STRIP_CTX) : 1;
     // with helpers, a step that runs k at a time takes about 1 / (1 + 0.65 (k - 1)) as long
     const k = name => pool ? Math.max(1, Math.min(pool.size, (pool.limits && pool.limits[name]) || pool.size)) : 1;
@@ -60,7 +58,7 @@
     const cost = [
       ['read', n * 0.03 * mp], ['order', n * 0.05], ['align', (n - 1) * 1.3 / alignPar],
       ['warp', (n - 1) * 0.07 * mp / par('warp', n)], ['prep', n * 0.012 * mp], ['flow', (n - 1) * (0.55 + 0.13 * mp) / par('flow', n)],
-      ['select', n * (0.25 + 0.036 * mp) / par('select', n)], ['export', retouch ? n * 0.035 * mp / par('exportFrame', n) : 0],
+      ['select', n * (0.25 + 0.036 * mp) / par('select', n)],
       ['merge', n * 0.165 * mp * strips / par('strip', stripRows ? Math.ceil(H / Math.max(1, stripRows - STRIP_CTX)) : 1)]];
     const total = cost.reduce((a, c) => a + c[1], 0), span = {};
     let acc = 0;
@@ -129,13 +127,10 @@
       context, so more, thinner strips cost more work in all). */
   function helperPlan(n, W, H, k, budgetMiB) {
     const px = W * H / 1e6 * 0.954;
-    const need = { flow: 18 + 20.7 * px, warp: 30 + 4 * px, exportFrame: 20 + 6 * px, texture: 20 + 2 * px };
+    const need = { flow: 18 + 20.7 * px, warp: 30 + 4 * px, texture: 20 + 2 * px };
     const stripNeed = rows => mergeNeedMiB(n, W, H, rows) + 63 * W * Math.min(H, rows) / 1048576;
     const limits = {};
     for (const t in need) limits[t] = Math.max(1, Math.min(k, Math.floor(budgetMiB / need[t])));
-    // a retouch copy is also turned into a JPEG, which holds about three full-size RGBA copies
-    // outside the heap while it runs: two at a time keeps that peak down for little time
-    limits.exportFrame = Math.min(limits.exportFrame, 2);
     let best = null;
     for (let kk = 1; kk <= k; kk++) for (let m = 1; m <= 8; m++) {
       const core = Math.max(2 * STRIP_CF + 64, Math.ceil(H / (kk * m) / 64) * 64), rows = core + 2 * STRIP_OV;
@@ -182,7 +177,7 @@
     const pre = Math.min(1, 1600 / Math.max(W, H));
     // the progress bar moves by each stage's share of the time it takes, so it (and the time
     // left the app shows) runs evenly
-    let at = progressPlan(n, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame, opts.pool && opts.pool.size > 0 && STORE.shareable ? opts.pool : null);
+    let at = progressPlan(n, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, opts.pool && opts.pool.size > 0 && STORE.shareable ? opts.pool : null);
     const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
     const rgb = [], gray = [], centreFocus = new Array(n), repeatS = new Array(n);
     // small float copies for the focus order (512 x 384) and the clamp test (~200 px), made from
@@ -282,7 +277,7 @@
     for (let i = 0; i < n; i++) if (!keep[i]) { STORE.drop(rgb[i].h); rgb[i] = null; }
     if (live.length < n) {
       // the bar from here on follows the photos still in play (it carries on from where it is)
-      const done = at('align', 1), at2 = progressPlan(live.length, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame, pool), base = at2('align', 1);
+      const done = at('align', 1), at2 = progressPlan(live.length, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, pool), base = at2('align', 1);
       at = (k, f) => k === 'read' || k === 'order' || k === 'align' ? (k === 'align' ? done : at2(k, f)) : done + (1 - done) * (at2(k, f) - base) / Math.max(1e-9, 1 - base);
     }
     // warped a band of rows at a time, straight into the parked copy (each output row depends
@@ -454,28 +449,12 @@
     const seen = unpark(cv, wmask[idx[0]]);
     for (const i of idx.slice(1)) { const m = unpark(cv, wmask[i]); cv.bitwise_or(seen, m, seen); m.delete(); }
     const box = largestRect(cv, seen); seen.delete();
-    // backlit eggs: the finish's numbers, from the reference photo, for the stack and every retouch copy
+    // backlit eggs: the finish's numbers, from the reference photo
     const egg = opts.eggs ? eggPrepFrom(cv, warped[ref], box) : null;
     if (egg) say(`backlit eggs: lamp colour taken out (×${egg.gain.map(g => g.toFixed(2)).join(' ')}), levels ${Math.round(egg.lo)}–${Math.round(egg.hi)}`);
     if (peek) peek('box', { W, H, box: Object.assign({}, box), used: idx.map(i => i + 1), left: left.map(i => ({ i, why: why[i] })),
       best: sharp && warped[sharp.best] ? { i: sharp.best, img: peekCrop(cv, warped[sharp.best], box, W, Math.min(720, box.w)) } : null });
 
-    // ---------- 5b. hand the lined-up photos to the retouch brush ----------
-    // Each is cropped and finished exactly like the stack, so painted pixels match.
-    // Photos that could not be lined up are not offered.
-    if (opts.onFrame) {
-      const offer = [...Array(n).keys()].filter(i => warped[i] && (keep[i] || !/lined up/.test(why[i])));
-      const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, sharpen: SHARPEN, egg, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
-      // handed on in order, each as soon as it and those before it are ready
-      const ready = new Array(ejobs.length); let next = 0, chain = Promise.resolve();
-      await each('exportFrame', ejobs, (k, fr, j) => {
-        progress(at('export', k / ejobs.length), 'Keeping photos for retouching');
-        ready[j] = fr;
-        while (next < ejobs.length && ready[next]) { const f = ready[next]; ready[next++] = null; chain = chain.then(() => opts.onFrame(f)); }
-        return chain;                                     // (one at a time when there are no helpers)
-      });
-      await chain;
-    }
     for (const i of left) { for (const a of [warped, wg, wmask, usable]) if (a[i]) STORE.drop(a[i].h); warped[i] = wg[i] = wmask[i] = usable[i] = null; }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
     progress(at('merge', 0), 'Merging');
@@ -705,51 +684,6 @@
     cv.addWeighted(f, 1 + amount, b, -amount, 0, out); b.delete();
     return out;
   }
-  /** One lined-up photo, cropped and sharpened like the stack, plus a small map of where it
-      is sharp (and agrees with the reference) for "sharpest here". img: the parked photo,
-      g8: its parked 8-bit grey. Worked a band of rows at a time; each band carries enough
-      rows around it that the result is the same as doing the whole frame at once. */
-  function exportFrame(cv, img, g8, ghostHalf, box, info, amount = 0.35) {
-    const W = img.cols, H = img.rows, m = 8, CTX = 24;
-    const x0 = Math.max(0, box.x - m), x1 = Math.min(W, box.x + box.w + m);
-    const data = new Uint8ClampedArray(box.w * box.h * 4);
-    const f = new cv.Mat(box.h, box.w, cv.CV_32F);              // sharpness at full size
-    for (let by = 0; by < box.h; by += BAND) {
-      const b1 = Math.min(box.h, by + BAND);
-      // sharpened colour: blur radius 4, so 8 rows either side are plenty
-      const y0 = Math.max(0, box.y + by - m), y1 = Math.min(H, box.y + b1 + m);
-      const rows = unpark(cv, img, y0, y1), big = rows.roi(new cv.Rect(x0, 0, x1 - x0, y1 - y0));
-      const sh = new cv.Mat();
-      if (amount > 0) { const bl = new cv.Mat(); cv.GaussianBlur(big, bl, new cv.Size(0, 0), 1.2, 1.2); cv.addWeighted(big, 1 + amount, bl, -amount, 0, sh); bl.delete(); }
-      else big.copyTo(sh);
-      big.delete(); rows.delete();
-      const c = sh.roi(new cv.Rect(box.x - x0, box.y + by - y0, box.w, b1 - by));
-      const rgba = new cv.Mat(); cv.cvtColor(c, rgba, cv.COLOR_RGB2RGBA); c.delete(); sh.delete();
-      data.set(rgba.data, by * box.w * 4); rgba.delete();
-      // sharpness: as focusMeasure on the box (its first blur sees past the box's edges, the
-      // later steps stop at them), with CTX rows of the box either side of the band
-      const e0 = Math.max(0, by - CTX), e1 = Math.min(box.h, b1 + CTX);
-      const gy0 = Math.max(0, box.y + e0 - 4), gy1 = Math.min(H, box.y + e1 + 4), gx0 = Math.max(0, box.x - 4), gx1 = Math.min(W, box.x + box.w + 4);
-      const gr = unpark(cv, g8, gy0, gy1), gc = gr.roi(new cv.Rect(gx0, 0, gx1 - gx0, gy1 - gy0)), gf = f32(cv, gc); gc.delete(); gr.delete();
-      const view = gf.roi(new cv.Rect(box.x - gx0, box.y + e0 - gy0, box.w, e1 - e0));
-      const fm = focusMeasure(cv, view, 4); view.delete(); gf.delete();
-      f.data32F.set(fm.data32F.subarray((by - e0) * box.w, (b1 - e0) * box.w), by * box.w); fm.delete();
-    }
-    const fw = Math.ceil(box.w / 8), fh = Math.ceil(box.h / 8);
-    const fs = new cv.Mat(); cv.resize(f, fs, new cv.Size(fw, fh), 0, 0, cv.INTER_AREA); f.delete();
-    const gh = ghostHalf.roi(new cv.Rect(Math.floor(box.x / 2), Math.floor(box.y / 2),
-      Math.min(ghostHalf.cols - Math.floor(box.x / 2), Math.ceil(box.w / 2)), Math.min(ghostHalf.rows - Math.floor(box.y / 2), Math.ceil(box.h / 2))));
-    const gs = new cv.Mat(); cv.resize(gh, gs, new cv.Size(fw, fh), 0, 0, cv.INTER_AREA); gh.delete();
-    cv.multiply(fs, gs, fs); gs.delete();
-    const res = Object.assign({}, info, {
-      width: box.w, height: box.h, data,
-      focus: { width: fw, height: fh, data: new Float32Array(fs.data32F) }
-    });
-    fs.delete();
-    return res;
-  }
-
-
   /** How well a photo agrees with the reference where either of them is sharp
       (the subject), 0..1. The frame-wide mean is dominated by background, so a
       small subject that walked off barely moves it; this weights by sharpness. */
@@ -2168,7 +2102,7 @@
      Translucent eggs lit from behind are seen through a milky veil of scattered light, tinted by
      the lamp, with the detail that matters (eye spots, the embryo's outline and segments) only a
      few levels deep. The finish, worked out once from the reference photo and applied the same
-     way to the stack and to every retouch copy (so painted pixels still match):
+     way to every stack:
        - the lamp's colour is taken out: the brightest unclipped, least coloured pixels are light
          straight through the silk, so they should be neutral;
        - white and black points from the picture itself, so every day's stack comes out alike
@@ -2696,13 +2630,6 @@
       cv.multiply(fT, gh, fT); gh.delete();
       res.wf = Float32Array.from(fT.data32F); fT.delete();
       return res;
-    },
-    /** one lined-up photo cropped and finished like the stack, for the retouch brush */
-    exportFrame(cv, a) {
-      const u8 = unpark(cv, a.usable), uF = f32(cv, u8); u8.delete();
-      const fr = exportFrame(cv, a.img, a.g8, uF, a.box, a.info, a.sharpen); uF.delete();
-      if (a.egg) eggFinish(fr.data, fr.width, fr.height, 4, a.egg);   // finished like the stack
-      return fr;
     },
     /** one photo's sharpest fine detail at every 7th pixel (texture thresholds for the merge) */
     texture(cv, a) {

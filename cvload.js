@@ -34,15 +34,6 @@ function transferables(o, out = []) {
   return out;
 }
 
-/** a lined-up photo for the retouch brush, as a JPEG (keeps the page's memory down) */
-async function encodeFrame(f) {
-  const c = new OffscreenCanvas(f.width, f.height);
-  c.getContext('2d').putImageData(new ImageData(f.data, f.width, f.height), 0, 0);
-  const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.95 });
-  c.width = c.height = 1;
-  return { photo: f.photo, used: f.used, why: f.why, ref: f.ref, width: f.width, height: f.height, blob, focus: f.focus };
-}
-
 /** The photo's pixels at w x h (RGBA), drawn the way the page always did. */
 async function decodeImage(file, w, h) {
   let bmp;
