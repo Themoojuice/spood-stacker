@@ -170,7 +170,7 @@
       title: 'Ghosts: where things moved',
       eq: 'u<sub>i</sub>(x) = agree<sub>i</sub>(x) · cover<sub>i</sub>(x) · trust<sub>i</sub>(x)',
       cap: 'Each photo is compared with the reference after blurring both to the same softness, so focus differences don\'t count. Red is where it still disagrees (a moved leg, a ghost), has no pixels of its own, or its line-up can\'t be trusted: it isn\'t used there. A photo that disagrees where it matters most is left out, with its reason.' },
-    { id: 'winners', stage: ['Choosing photos', 'Keeping photos for retouching'], nominal: 12500, weight: 1.7,
+    { id: 'winners', stage: ['Choosing photos'], nominal: 12500, weight: 1.7,
       title: 'Who\'s sharpest where',
       eq: 'w<sub>i</sub>(x) = F<sub>i</sub>(x) u<sub>i</sub>(x) / Σ<sub>j</sub> F<sub>j</sub>(x) u<sub>j</sub>(x)',
       cap: 'Every spot votes for the photo with the most focus energy there, counting only where that photo agrees with the reference and can be trusted (u). Coloured by focus order, the votes make a rough depth map, and then it rises into one: height from focus order, your spider\'s colours on top. A rough 3D model from focus alone.' },
@@ -183,7 +183,7 @@
       eq: S => S.sharp ? `sharp across ${Math.round(100 * S.sharp.stack)}% of the frame &nbsp;·&nbsp; best single photo ${Math.round(100 * S.sharp.bestShare)}%` : 'every spot from the photo sharpest there',
       cap: 'Your best single photo, lined up, then the stack pulled across it, then a slow drift onto the stack\'s most detailed spot. Sharp means within a factor of ten of the frame\'s sharpest spots, on the focus maps the stacker chose photos by.' }
   ];
-  const STAGE_RANK = ['Reading photos', 'Working out focus order', 'Lining up photos', 'Correcting movement', 'Choosing photos', 'Keeping photos for retouching', 'Merging', 'Done'];
+  const STAGE_RANK = ['Reading photos', 'Working out focus order', 'Lining up photos', 'Correcting movement', 'Choosing photos', 'Merging', 'Done'];
   const MERGE = SCENES.findIndex(s => s.id === 'merge'), REVEAL = SCENES.findIndex(s => s.id === 'reveal');
   const NOM = id => SCENES.find(s => s.id === id).nominal;
   /** seconds from the first to the last photo of the burst, from the cameras' time stamps */

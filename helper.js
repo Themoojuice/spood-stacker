@@ -1,6 +1,6 @@
 /* A helper for the stacking engine (started by worker.js): its own OpenCV, running the heavy
-   per-photo and per-strip steps the engine hands it (warp, local correction, merge strips,
-   retouch copies), side by side with the other helpers, on parked images in the shared
+   per-photo and per-strip steps the engine hands it (warp, local correction, merge strips),
+   side by side with the other helpers, on parked images in the shared
    scratch file. */
 importScripts('cvload.js', 'engine.js');
 
@@ -27,7 +27,6 @@ onmessage = async e => {
     } else {
       result = await self.SalticidStacker.tasks[m.name](cv, m.args, f => postMessage({ id: m.id, progress: f }));
       if (m.name === 'warp' || m.name === 'flow') ah.flush();   // written straight into the scratch file
-      if (m.name === 'exportFrame' && m.args.encode && typeof OffscreenCanvas !== 'undefined') result = await encodeFrame(result);
     }
     postMessage({ id: m.id, result, heap: cv.HEAP8.length }, transferables(result));
   } catch (err) {

@@ -1,4 +1,4 @@
-/* The finished stack's sharpening, shared by the page, the retouch editor and the tests.
+/* The finished stack's sharpening, shared by the page (result and close-up) and the tests.
 
    An unsharp mask with three changes from the plain kind:
    - brightness only: the same lift is added to red, green and blue, so coloured edges get
@@ -9,7 +9,7 @@
    - faint detail (under about CORE levels: JPEG noise, sensor grain) is mostly left alone,
      so smooth backgrounds don't turn gritty.
    Works on 8-bit RGBA, any rectangle at a time (each output pixel only reads RADIUS + 1
-   pixels around it), so the retouch editor can sharpen just what a brush stroke changed. */
+   pixels around it), so the close-up can sharpen just the part on screen. */
 (function (root, factory) {
   const m = factory();
   if (typeof module === 'object' && module.exports) module.exports = m;

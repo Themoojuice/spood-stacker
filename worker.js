@@ -260,18 +260,13 @@ self.onmessage = async ev => {
     });
     const out = await self.SalticidStacker.stackFrames(cv, frames, Object.assign({}, opts, {
       maxSide: plan.side, stripRows: plan.stripRows, store: store || undefined,
-      sharpen: 0,                     // the page sharpens the result (and the retouch copies) itself, at the slider's amount
+      sharpen: 0,                     // the page sharpens the result itself, at the slider's amount
       pool: helpers ? { size: helpers, limits: plan.limits, cores: navigator.hardwareConcurrency || 0, run: (name, args, onProgress) => pool.run(name, args, onProgress) } : undefined,
       onProgress: (p, s) => postMessage({ type: 'progress', p, s }),
       onLog: m => postMessage({ type: 'log', m }),
       onSelection: sel => postMessage({ type: 'selection', sel }),
       // "watch the maths": small previews of each stage for the page's animation
-      onPeek: opts.peek ? (name, d) => postMessage({ type: 'peek', name, d }) : undefined,
-      // lined-up photos for the retouch brush, sent as JPEGs to keep the page's memory down
-      onFrame: opts.retouch && typeof OffscreenCanvas !== 'undefined' ? async f => {
-        const frame = f.blob ? f : await encodeFrame(f);              // a helper may have encoded it already
-        postMessage({ type: 'frame', frame }, [frame.focus.data.buffer]);
-      } : null, encodeFrames: true
+      onPeek: opts.peek ? (name, d) => postMessage({ type: 'peek', name, d }) : undefined
     }));
     if (helpers) postMessage({ type: 'log', m: `memory: main ${Math.round(cv.HEAP8.length / 1048576)} MB, helpers ${[...pool.heaps.values()].map(h => Math.round(h / 1048576)).join(' + ')} MB` });
     if (store) { const st = store.stats(); postMessage({ type: 'log', m: `scratch storage used: ${st.fileMiB} MB of ${st.reservedMiB} MB set aside` + (st.inMemoryMiB ? ` (+${st.inMemoryMiB} MB kept in memory)` : '') }); }
@@ -282,7 +277,7 @@ self.onmessage = async ev => {
     if (helpers) await pool.all({ type: 'close' }).catch(() => {});
     if (store) await store.close();
     // fresh helpers for the next stack: a WebAssembly heap never shrinks, so this hands their
-    // memory back now (to the retouch brush, the rest of the phone) instead of holding it
+    // memory back now (to the page, the rest of the phone) instead of holding it
     if (pool) { pool.stop(); pool = new HelperPool(HELPERS); }
   }
 };

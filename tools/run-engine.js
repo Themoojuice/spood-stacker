@@ -29,7 +29,6 @@ async function main() {
   await writeRGBA(outPrefix + '.png', out);
   const refLine = (out.log || []).find(l => /reference photo \d+/.test(l)) || '';
   const ref = +((refLine.match(/reference photo (\d+)/) || [])[1] || 0);
-  // optional extras from newer engines (retouch frames) are ignored here
   fs.writeFileSync(outPrefix + '.json', JSON.stringify({
     photos: photos.map(p => require('path').basename(p)), secs, width: out.width, height: out.height,
     ref, selection, log: out.log || []
