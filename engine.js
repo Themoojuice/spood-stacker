@@ -182,7 +182,7 @@
     const pre = Math.min(1, 1600 / Math.max(W, H));
     // the progress bar moves by each stage's share of the time it takes, so it (and the time
     // left the app shows) runs evenly
-    const at = progressPlan(n, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame, opts.pool && opts.pool.size > 0 && STORE.shareable ? opts.pool : null);
+    let at = progressPlan(n, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame, opts.pool && opts.pool.size > 0 && STORE.shareable ? opts.pool : null);
     const cy0 = Math.floor(H * .3), cy1 = Math.floor(H * .7), cx0 = Math.floor(W * .3), cx1 = Math.floor(W * .7);
     const rgb = [], gray = [], centreFocus = new Array(n), repeatS = new Array(n);
     // small float copies for the focus order (512 x 384) and the clamp test (~200 px), made from
@@ -250,12 +250,46 @@
     const inl = new Array(n).fill(9999), eccOk = new Array(n).fill(true), rough = new Array(n).fill(false);
     for (const r of cres) { for (const [i, h, nI, ok, rg] of r.done) { Hs[i] = h; inl[i] = nI; eccOk[i] = ok; rough[i] = !!rg; } r.logs.forEach(say); }
     if (peek) for (const r of cres) for (const m of r.peeks || []) peek('match', Object.assign({ W, H }, m));
-    gd.length = 0; fts.length = 0;
+    fts.length = 0;
+
+    // ---------- 3a. the plan: the reference and the photos to use (see planChoose) ----------
+    const keep = new Array(n).fill(true), why = new Array(n).fill('');
+    // (a) photos that could not be lined up
+    for (let i = 0; i < n; i++) if (i !== ref && inl[i] < 15 && !eccOk[i]) { keep[i] = false; why[i] = 'could not be lined up with the others'; }
+    if (!opts.noPlan && n > 2) {
+      const ps = Math.min(1, PLAN_SIDE / Math.max(W, H)), pw = Math.max(16, Math.round(W * ps)), ph = Math.max(16, Math.round(H * ps));
+      const cand = [...Array(n).keys()].filter(i => keep[i]);
+      const pres = await each('plan', cand.map(i => ({ g: gd[i], Hm: Hs[i], W, H, pw, ph, pre, mask: maskP })));
+      const P = new Array(n).fill(null); cand.forEach((i, k) => { P[i] = pres[k]; });
+      pres.length = 0;
+      const ch = planChoose(cv, P, pw, ph, centreFocus, moment.apart, !!opts.keepAll, srcPx, ref);
+      P.length = 0;
+      if (opts.onDebug) opts.onDebug('plan', { ref0: ref, ref: ch.ref, score: ch.score.slice(), A: ch.A.map(r => Array.from(r)), use: ch.use.slice(), left: ch.left.slice(), gains: ch.gains.slice(), kept: ch.kept });
+      if (ch.ref >= 0 && ch.ref !== ref) {
+        // every line-up re-based on the new reference (each was fine-tuned against the old one)
+        const Hi = inv3(Hs[ch.ref]);
+        for (let i = 0; i < n; i++) Hs[i] = i === ch.ref ? eye3() : mul3(Hi, Hs[i]);
+        inl[ref] = inl[ch.ref]; inl[ch.ref] = 9999; eccOk[ref] = eccOk[ch.ref]; eccOk[ch.ref] = true; rough[ref] = rough[ch.ref]; rough[ch.ref] = false;
+        say(`reference photo ${ch.ref + 1}: it and the photos that agree with it keep the most sharp detail (${Math.round(ch.score[ch.ref] * 100)}% against ${Math.round(ch.score[ref] * 100)}% with photo ${ref + 1}, the sharpest in the centre)`);
+        ref = ch.ref;
+      }
+      for (const l of ch.left) { keep[l.i] = false; why[l.i] = l.why; }
+      if (ch.left.length) say(`plan: using ${ch.use.length} of ${cand.length} photos (${ch.use.map(i => i + 1).join(' ')}), chosen before the full-size work`);
+    }
+    gd.length = 0;
+    // photos left out so far are done with: their parked copies are freed now
+    const live = [...Array(n).keys()].filter(i => keep[i]);
+    for (let i = 0; i < n; i++) if (!keep[i]) { STORE.drop(rgb[i].h); rgb[i] = null; }
+    if (live.length < n) {
+      // the bar from here on follows the photos still in play (it carries on from where it is)
+      const done = at('align', 1), at2 = progressPlan(live.length, W, H, opts.stripRows && H > opts.stripRows ? opts.stripRows : 0, !!opts.onFrame, pool), base = at2('align', 1);
+      at = (k, f) => k === 'read' || k === 'order' || k === 'align' ? (k === 'align' ? done : at2(k, f)) : done + (1 - done) * (at2(k, f) - base) / Math.max(1e-9, 1 - base);
+    }
     // warped a band of rows at a time, straight into the parked copy (each output row depends
     // only on the line-up, so the bands join exactly)
     const warped = new Array(n), wmask = new Array(n), wjobs = [];
     progress(at('warp', 0), 'Lining up photos');
-    for (let i = 0; i < n; i++) {
+    for (const i of live) {
       if (Hs[i].every((v, k) => v === (k % 4 === 0 ? 1 : 0))) {
         // the reference: warping it would copy it pixel for pixel (interpolation at whole pixels)
         warped[i] = rgb[i]; rgb[i] = null; wmask[i] = park(cv, masks[i].clone());
@@ -275,7 +309,8 @@
     // has no pixels of its own it is filled from the photos that do, so its pyramid
     // has no false edges there; its weight is zero there (coverage maps, below).
     progress(at('prep', 0), 'Correcting movement');
-    const covShare = fillUncovered(cv, warped, wmask, ref);
+    const covShare = new Array(n).fill(1);
+    fillUncovered(cv, live.map(i => warped[i]), live.map(i => wmask[i]), live.indexOf(ref)).forEach((c, k) => { covShare[live[k]] = c; });
     progress(at('prep', 0.35), 'Correcting movement');
     covShare.forEach((c, i) => { if (i !== ref && c < 0.97) say(`photo ${i + 1}: covers ${Math.round(c * 100)}% of the reference's view`); });
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2);
@@ -283,7 +318,10 @@
     // ---------- 3c. shiny subjects (opts.tame): lighting matched, glare found ----------
     let shine = null;
     if (opts.tame) {
-      shine = await tameShine(cv, warped, ref, W, H, each);
+      shine = await tameShine(cv, live.map(i => warped[i]), live.indexOf(ref), W, H, each);
+      { const E = new Array(n).fill(null), D = new Array(n).fill(null), sh = new Array(n).fill(0);
+        live.forEach((i, k) => { E[i] = shine.E[k]; D[i] = shine.D[k]; sh[i] = shine.share[k]; });
+        shine.E = E; shine.D = D; shine.share = sh; }
       shine.logs.forEach(say);
       if (opts.onDebug) opts.onDebug('shine', shine);
       const glary = shine.share.filter(s => s > 0.001).length;
@@ -299,19 +337,20 @@
     // greys kept as 8-bit (they come from 8-bit photos anyway); a float copy is made
     // only while one is in use (was a full-size float per photo, 4 bytes a pixel)
     const wg = warped.map((p, i) => {
+      if (!p) return null;
       progress(at('prep', 0.35 + 0.55 * i / n), 'Correcting movement');
       const out = parkEmpty(H, W, cv.CV_8U, 1);
       for (let y0 = 0; y0 < H; y0 += BAND) { const y1 = Math.min(H, y0 + BAND), m = unpark(cv, p, y0, y1), g = gray8(cv, m); m.delete(); parkRows(out, y0, g); g.delete(); }
       return out;
     });
     const F = p => Fp(cv, p);                             // float grey of a parked 8-bit grey
-    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(pdata(g), v => v / 255)), Hs: Hs.map(h => h.slice()) });
+    if (opts.onDebug) opts.onDebug('lined', { ref, width: W, height: H, grays: wg.map(g => g ? Float32Array.from(pdata(g), v => v / 255) : null), Hs: Hs.map(h => h.slice()) });
     const trust = new Array(n).fill(null);
     // the reference's side of every comparison below is made once (small and half-size copies),
     // by whoever does the work
     const refKey = runId + ':ref';
     progress(at('prep', 1), 'Correcting movement');
-    const fjobs = order.filter(c => c !== ref).map(cur => ({ cur, wg: wg[cur], wm: wmask[cur], img: warped[cur], wgRef: wg[ref], wmRef: wmask[ref], key: refKey, W, H, hw, hh, peek: !!peek }));
+    const fjobs = order.filter(c => c !== ref && keep[c]).map(cur => ({ cur, wg: wg[cur], wm: wmask[cur], img: warped[cur], wgRef: wg[ref], wmRef: wmask[ref], key: refKey, W, H, hw, hh, peek: !!peek }));
     const fres = await each('flow', fjobs, (k, r, j) => {
       progress(at('flow', k / fjobs.length), 'Correcting movement');
       if (peek && r) { peek('flow', { cur: fjobs[j].cur, W, H, grid: r.grid, share: r.share, nccG: r.nccG, nccF: r.nccF, accepted: r.accepted, trust: peekThumb(r.trust, hw, hh, 1, 200), disG: r.disG || null, disF: r.disF || null }); r.grid = r.disG = r.disF = null; }
@@ -326,12 +365,9 @@
     });
     fres.length = 0;                                      // (results were kept to the end of the stack)
     trust[ref] = park(cv, new cv.Mat(hh, hw, cv.CV_8U, new cv.Scalar(255)));
-    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => Float32Array.from(pdata(g), v => v / 255)), trust: trust.map(t => Float32Array.from(pdata(t), v => v / 255)), hw, hh });
+    if (opts.onDebug) opts.onDebug('flowed', { ref, width: W, height: H, grays: wg.map(g => g ? Float32Array.from(pdata(g), v => v / 255) : null), trust: trust.map(t => t ? Float32Array.from(pdata(t), v => v / 255) : null), hw, hh });
 
-    // ---------- 5. choose which photos to use ----------
-    const keep = new Array(n).fill(true), why = new Array(n).fill('');
-    // (a) photos that could not be lined up
-    for (let i = 0; i < n; i++) if (i !== ref && inl[i] < 15 && !eccOk[i]) { keep[i] = false; why[i] = 'could not be lined up with the others'; }
+    // ---------- 5. choose which photos to use (the plan has already left some out, 3a) ----------
     // (a2) photos that matched far worse than the rest and could not be fine-tuned:
     //      usually the subject (or something big in frame) moved, not the camera
     const inlOthers = inl.filter((v, i) => i !== ref && keep[i]);
@@ -351,10 +387,11 @@
     // each photo's measurements for the choices below (thumbnails, agreement with the reference,
     // what it may contribute), worked out side by side when there are helpers
     const qs = Math.min(0.25, 1000 / Math.max(W, H));     // quarter size, at most 1000 px across
-    const sres = await each('select', [...Array(n).keys()].map(i => ({ wg: wg[i], wm: wmask[i], trust: trust[i], wgRef: wg[ref], key: refKey, W, H, hw, hh, qs, judge: i !== ref,
+    const sres = new Array(n).fill(null);
+    (await each('select', live.map(i => ({ wg: wg[i], wm: wmask[i], trust: trust[i], wgRef: wg[ref], key: refKey, W, H, hw, hh, qs, judge: i !== ref,
       shine: shine ? { aw: shine.aw, ah: shine.ah, E: shine.E[i], D: shine.D[i] } : null })),
-      k => progress(at('select', 0.85 * k / n), 'Choosing photos'));
-    for (let i = 0; i < n; i++) { STORE.drop(trust[i].h); trust[i] = null; }
+      k => progress(at('select', 0.85 * k / live.length), 'Choosing photos'))).forEach((r, k) => { sres[live[k]] = r; });
+    for (const i of live) { STORE.drop(trust[i].h); trust[i] = null; }
     // (b) near-duplicates: keep the higher-resolution (then sharper) copy.
     //     Compared only where both photos have pixels of their own.
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
@@ -381,6 +418,7 @@
     const usable = new Array(n), ghosts = [];
     for (let i = 0; i < n; i++) {
       const r = sres[i];
+      if (!r) { usable[i] = null; continue; }           // left out by the plan (3a)
       if (keep[i] && i !== ref) {
         const gap = moment.apart[i];
         if (opts.keepAll) { /* test hook: judge nothing here */ }
@@ -426,7 +464,7 @@
     // Each is cropped and finished exactly like the stack, so painted pixels match.
     // Photos that could not be lined up are not offered.
     if (opts.onFrame) {
-      const offer = [...Array(n).keys()].filter(i => keep[i] || !/lined up/.test(why[i]));
+      const offer = [...Array(n).keys()].filter(i => warped[i] && (keep[i] || !/lined up/.test(why[i])));
       const ejobs = offer.map(i => ({ img: warped[i], g8: wg[i], usable: usable[i], box, sharpen: SHARPEN, egg, encode: !!opts.encodeFrames, info: { photo: i + 1, used: keep[i], why: why[i], ref: i === ref } }));
       // handed on in order, each as soon as it and those before it are ready
       const ready = new Array(ejobs.length); let next = 0, chain = Promise.resolve();
@@ -438,13 +476,13 @@
       });
       await chain;
     }
-    for (const i of left) { STORE.drop(warped[i].h); STORE.drop(wg[i].h); STORE.drop(wmask[i].h); STORE.drop(usable[i].h); warped[i] = wg[i] = wmask[i] = usable[i] = null; }
+    for (const i of left) { for (const a of [warped, wg, wmask, usable]) if (a[i]) STORE.drop(a[i].h); warped[i] = wg[i] = wmask[i] = usable[i] = null; }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
     progress(at('merge', 0), 'Merging');
     await tick();
 
     // ---------- 6. hybrid fusion ----------
-    for (const i of idx) { STORE.drop(wg[i].h); wg[i] = null; }
+    for (const i of idx) { if (wg[i]) STORE.drop(wg[i].h); wg[i] = null; }
     const debug = opts.onDebug ? (name, d) => opts.onDebug(name, Object.assign({ photos: idx.map(i => i + 1), box }, d)) : null;
     let out;
     if (opts.stripRows && H > opts.stripRows) {
@@ -477,6 +515,148 @@
     trash.forEach(m => free(m));
     progress(1, 'Done');
     say(`result ${out.width}×${out.height}`);
+    return out;
+  }
+
+  /* ---------- the plan: which photos to use, decided before the full-size work ----------
+     As soon as every photo is lined up (from its <= 1600 px grey), each one's sharpness map and a
+     softened copy are made at PLAN_SIDE across, already lined up. From these:
+     - every pair of photos is compared where either is sharp (as the later movement check does),
+       which tells which photos agree with which: a burst refocused after the spider shifted, or a
+       second burst framed afresh, falls into its own group;
+     - the reference is the photo whose group keeps the most sharp detail. The sharpest centre
+       only breaks ties, so in a burst where every photo agrees nothing changes. (The old rule,
+       sharpest centre and from the main moment, could throw away the only photo sharp somewhere:
+       a pair of bursts of a spider that shifted between them lost the one slice with sharp palps.)
+     - photos are then taken in, best first, only while each adds sharp detail the ones already
+       chosen lack. A photo nearly as sharp everywhere as one already chosen adds nothing but its
+       own slight misfit and noise, so 25 photos of one subject may come down to the 4-8 that
+       carry it. Photos clearly at odds with the reference go too.
+     Everything left out here is dropped at once: no full-size warp, local correction or maps, and
+     its parked copy is freed for the next one. The later checks still run on what is kept. */
+  const PLAN_SIDE = 640;            // the plan's maps, long side in pixels
+  const PLAN_MOVED = 0.5;           // agreement with the reference below this (where sharp, at plan size): clearly moved; 0.5..0.65 is left to the full-size check
+  const PLAN_LO = 0.25, PLAN_HI = 0.8;   // a spot counts as kept from nothing (a photo at 1/4 of the best sharpness there) to fully (4/5 of it, as "near-equal" elsewhere)
+  const PLAN_GAIN = 0.005;          // a photo is taken in only if it adds this share of the sharp detail
+  const PLAN_TIE = 0.03;            // references keeping within this share of the best are equal: the sharpest centre wins (0.01 cost 0.2-0.4 dB on synthetic bursts: a switch is only worth it when clearly better)
+  const PLAN_APART = 0.03;          // a photo from another moment is the reference only if it keeps this much more
+
+  /** How much of a spot's best sharpness `q` (0..1, a ratio of focus measures) counts as kept. */
+  function planValue(q) { return q <= PLAN_LO ? 0 : q >= PLAN_HI ? 1 : Math.log(q / PLAN_LO) / Math.log(PLAN_HI / PLAN_LO); }
+
+  /** Agreement of two plan maps, 0..1 per pixel (as ghostHalf: both softened, so focus alone doesn't count). */
+  function planGhost(cv, A, B, pw, ph, sigma = 1.2) {
+    const N = pw * ph, g = new cv.Mat(ph, pw, cv.CV_32F), G = g.data32F, tol = 0.06 * 255;
+    for (let k = 0; k < N; k++) { const d = Math.abs(A.b[k] - B.b[k]); G[k] = d <= tol ? 1 : d >= 2 * tol ? 0 : 2 - d / tol; }
+    cv.GaussianBlur(g, g, new cv.Size(0, 0), sigma, sigma);
+    const out = Float32Array.from(G); g.delete();
+    return out;
+  }
+
+  /** The q-quantile of a (every `step`th value; positive values only if `pos`), without sorting it all. */
+  function pct(a, q, step, pos = false) {
+    const v = []; for (let k = 0; k < a.length; k += step) if (!pos || a[k] > 0) v.push(a[k]);
+    if (!v.length) return 0;
+    const s = Float32Array.from(v).sort(); return s[Math.min(s.length - 1, Math.floor(s.length * q))];
+  }
+  /** Plan maps at half size (qw x qh): sharpness and grey averaged, coverage where all of it is covered. */
+  function planHalf(cv, Pi, pw, ph, qw, qh) {
+    const r = (u, type, interp) => { const m = cv.matFromArray(ph, pw, type, u), o = new cv.Mat(); cv.resize(m, o, new cv.Size(qw, qh), 0, 0, interp); m.delete(); const d = type === cv.CV_32F ? Float32Array.from(o.data32F) : Uint8Array.from(o.data); o.delete(); return d; };
+    const c = r(Uint8Array.from(Pi.c, v => v * 255), cv.CV_8U, cv.INTER_AREA); for (let k = 0; k < c.length; k++) c[k] = c[k] >= 250 ? 1 : 0;
+    return { f: r(Pi.f, cv.CV_32F, cv.INTER_AREA), b: r(Pi.b, cv.CV_8U, cv.INTER_AREA), c };
+  }
+
+  /** The plan's choice. P[i]: plan maps of photo i ({f, b, c}) or null (not a candidate).
+      Returns the reference, the photos to use, and why each other candidate is left out. */
+  function planChoose(cv, P, pw, ph, centreFocus, apart, keepAll, srcPx = null, ref0 = -1) {
+    const n = P.length, N = pw * ph, cand = [...Array(n).keys()].filter(i => P[i]);
+    // a photo with fewer pixels of its own (an edited, shrunk copy) holds less detail than its
+    // enlarged copy's sharpness says: its sharpness counts in proportion (by the square root)
+    if (srcPx) {
+      const top = Math.max(...cand.map(i => srcPx[i]));
+      for (const i of cand) { const r = srcPx[i] / top; if (r < 0.9) { const f = P[i].f, q = Math.sqrt(r); for (let k = 0; k < N; k++) f[k] *= q; } }
+    }
+    // where anything is sharp, how sharp the sharpest photo is there, and how much each spot counts
+    const weigh = (Q, M) => {
+      const Fm = new Float32Array(M);
+      for (const i of cand) { const f = Q[i].f; for (let k = 0; k < M; k++) if (f[k] > Fm[k]) Fm[k] = f[k]; }
+      const T = pct(Fm, 0.9, 3) || 1e-9, w = new Float32Array(M); let sum = 0;
+      for (let k = 0; k < M; k++) { const v = Fm[k] >= 0.02 * T ? Math.min(1, Fm[k] / T) : 0; w[k] = v; sum += v; }
+      return { Fm, w, sum: sum || 1 };
+    };
+    // Every pair is compared on maps half the plan's size (the pairs grow as n squared; this is
+    // only to tell which photos agree and what each reference could keep): agreement where
+    // either photo is sharp, and what each could take from the other.
+    const qw = Math.ceil(pw / 2), qh = Math.ceil(ph / 2), M = qw * qh;
+    const Q = new Array(n).fill(null);
+    for (const i of cand) Q[i] = planHalf(cv, P[i], pw, ph, qw, qh);
+    const hv = weigh(Q, M);
+    const kept = cap => { let s = 0; for (let k = 0; k < M; k++) if (hv.w[k]) s += hv.w[k] * planValue(cap[k] / hv.Fm[k]); return s / hv.sum; };
+    const A = [...Array(n)].map(() => new Float32Array(n).fill(1));
+    const cap = new Array(n);
+    for (const i of cand) cap[i] = Float32Array.from(Q[i].f);
+    const mx = new Float32Array(M);
+    for (let a = 0; a < cand.length; a++) for (let b = a + 1; b < cand.length; b++) {
+      const i = cand[a], j = cand[b], Qi = Q[i], Qj = Q[j], G = planGhost(cv, Qi, Qj, qw, qh, 0.6);
+      // agreement where either photo is sharp, over what both saw (subjectAgreement's weighting)
+      for (let k = 0; k < M; k++) mx[k] = Qi.c[k] && Qj.c[k] ? Math.max(Qi.f[k], Qj.f[k]) : 0;
+      const top = pct(mx, 0.99, 7, true) || 1e-9;
+      let sw = 0, sg = 0;
+      for (let k = 0; k < M; k++) { const w = Math.min(1, mx[k] / top); if (w < 0.1) continue; sw += w; sg += w * G[k]; }
+      const ag = sw > 0 ? sg / sw : 1;
+      A[i][j] = A[j][i] = ag;
+      if (ag < PLAN_MOVED) continue;
+      const Ci = cap[i], Cj = cap[j], Fi = Qi.f, Fj = Qj.f;
+      for (let k = 0; k < M; k++) { const g = G[k]; let v = Fj[k] * g; if (v > Ci[k]) Ci[k] = v; v = Fi[k] * g; if (v > Cj[k]) Cj[k] = v; }
+    }
+    Q.length = 0;
+    const score = new Array(n).fill(-1);
+    for (const i of cand) { score[i] = kept(cap[i]); cap[i] = null; }
+    // the reference: the one that keeps the most. The first guess (sharpest centre, main moment)
+    // stays unless another clearly keeps more; among near-equals the main moment, then the
+    // sharpest centre; a photo from another moment must win by PLAN_APART more
+    const eff = i => score[i] - (apart[i] ? PLAN_APART : 0);
+    const bestEff = Math.max(...cand.map(eff));
+    let ref = P[ref0] && eff(ref0) >= bestEff - PLAN_TIE ? ref0 : -1;
+    if (ref < 0) for (const i of cand) {
+      if (eff(i) < bestEff - PLAN_TIE) continue;
+      if (ref < 0 || (apart[ref] && !apart[i]) || (!apart[ref] === !apart[i] && centreFocus[i] > centreFocus[ref])) ref = i;
+    }
+    const out = { ref, A, score, use: cand.slice(), left: [], gains: new Array(n).fill(null) };
+    if (keepAll) return out;
+    const { Fm: Fmax, w: wt, sum: wsum } = weigh(P, N);
+    // photos taken in, best first, while each adds sharp detail the chosen ones lack
+    const pool = [], G = new Array(n);
+    for (const j of cand) {
+      if (j === ref) continue;
+      if (A[ref][j] < PLAN_MOVED) { out.left.push({ i: j, why: 'the subject moved between photos', ag: A[ref][j] }); continue; }
+      G[j] = planGhost(cv, P[ref], P[j], pw, ph); pool.push(j);
+    }
+    const have = Float32Array.from(P[ref].f), use = [ref];
+    const val = new Float32Array(N);
+    for (let k = 0; k < N; k++) val[k] = wt[k] ? planValue(have[k] / Fmax[k]) : 0;
+    while (pool.length) {
+      let bj = -1, bg = -1;
+      for (const j of pool) {
+        const f = P[j].f, g = G[j]; let s = 0;
+        for (let k = 0; k < N; k++) {
+          if (!wt[k]) continue;
+          const v = f[k] * g[k]; if (v <= have[k]) continue;
+          s += wt[k] * (planValue(v / Fmax[k]) - val[k]);
+        }
+        s /= wsum || 1;
+        if (s > bg) { bg = s; bj = j; }
+      }
+      out.gains[bj] = bg;
+      if (bg < PLAN_GAIN) break;
+      use.push(bj); pool.splice(pool.indexOf(bj), 1);
+      const f = P[bj].f, g = G[bj];
+      for (let k = 0; k < N; k++) { const v = f[k] * g[k]; if (v > have[k]) { have[k] = v; if (wt[k]) val[k] = planValue(v / Fmax[k]); } }
+      G[bj] = null;
+    }
+    for (const j of pool) out.left.push({ i: j, why: 'adds nothing sharp the others lack', gain: out.gains[j] });
+    out.use = use.sort((a, b) => a - b);
+    { let s = 0; for (let k = 0; k < N; k++) if (wt[k]) s += wt[k] * planValue(have[k] / Fmax[k]); out.kept = s / wsum; }
     return out;
   }
 
@@ -2289,6 +2469,38 @@
       }
       const g8s = to8(cv, sm); sm.delete();
       res.gray = { data: new Uint8Array(g8s.data), rows: g8s.rows, cols: g8s.cols }; g8s.delete();
+      return res;
+    },
+    /** one photo's plan maps (see planChoose): its <= 1600 px grey lined up at pw x ph; its
+        sharpness (f, zero outside the photo), softened grey (b, 8-bit) and coverage (c) */
+    plan(cv, a) {
+      const { W, H, pw, ph, pre } = a, p = pw / W;
+      const g = cv.matFromArray(a.g.rows, a.g.cols, cv.CV_8U, a.g.data);
+      // shrunk first (area average), then warped at plan size: no aliasing from the warp
+      const sw = Math.max(8, Math.round(a.g.cols * p / pre)), sh = Math.max(8, Math.round(a.g.rows * p / pre));
+      const s = new cv.Mat(); cv.resize(g, s, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+      // sharpness measured on the <= 1600 px grey (at plan size two slices sharp at slightly
+      // different depths look the same), then shrunk and lined up like the grey
+      const gP = f32(cv, g); g.delete();
+      const fp = focusMeasure(cv, gP, 2); gP.delete();
+      const fs = new cv.Mat(); cv.resize(fp, fs, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA); fp.delete();
+      const sx = sw / (W * p), sy = sh / (H * p);                                  // rounding of the shrunk size
+      const Hq = mul3(mul3([p, 0, 0, 0, p, 0, 0, 0, 1], a.Hm), [1 / (p * sx), 0, 0, 0, 1 / (p * sy), 0, 0, 0, 1]);
+      const M = cv.matFromArray(3, 3, cv.CV_64F, Hq);
+      const w = new cv.Mat(); cv.warpPerspective(s, w, M, new cv.Size(pw, ph), cv.INTER_LINEAR, cv.BORDER_REFLECT);
+      // coverage: the clamp mask (photo coordinates) through the same warp, a little inside its edge
+      const m0 = unpark(cv, a.mask), ms = new cv.Mat(); cv.resize(m0, ms, new cv.Size(sw, sh), 0, 0, cv.INTER_NEAREST); m0.delete();
+      const cm = new cv.Mat(); cv.warpPerspective(ms, cm, M, new cv.Size(pw, ph), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0)); ms.delete();
+      const se = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)); cv.erode(cm, cm, se); se.delete();
+      s.delete();
+      const fm = new cv.Mat(); cv.warpPerspective(fs, fm, M, new cv.Size(pw, ph), cv.INTER_LINEAR, cv.BORDER_REFLECT); fs.delete(); M.delete();
+      const F = Float32Array.from(fm.data32F); fm.delete();
+      const gF = f32(cv, w); w.delete();
+      const bl = new cv.Mat(); cv.GaussianBlur(gF, bl, new cv.Size(0, 0), 1.6, 1.6); gF.delete();
+      const b8 = to8(cv, bl); bl.delete();
+      const C = Uint8Array.from(cm.data, v => (v ? 1 : 0)); cm.delete();
+      for (let k = 0; k < F.length; k++) if (!C[k]) F[k] = 0;
+      const res = { f: F, b: Uint8Array.from(b8.data), c: C }; b8.delete();
       return res;
     },
     /** one photo's features (AKAZE, on its <= 1600 px grey) */
