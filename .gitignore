@@ -3,7 +3,8 @@ tests/bursts/
 tests/.cache/
 compare-out/
 app-check-out/
-retouch-effect-out/
+clear-check-out/
+maths-check-out/
 tools/node_modules/
 tools/package-lock.json
 __pycache__/
