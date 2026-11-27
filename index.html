@@ -151,6 +151,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       <label><input type="radio" name="subject" value="normal" checked><b>Spider or bug</b></label>
       <label><input type="radio" name="subject" value="tame"><b>Wet or shiny</b></label>
       <label><input type="radio" name="subject" value="eggs"><b>Backlit eggs</b></label>
+      <label><input type="radio" name="subject" value="silk"><b>Silk or cobwebs</b></label>
       <p class="note" id="subjectNote"></p>
     </fieldset>
   </section>
@@ -217,6 +218,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       <button class="ghost" id="again">Stack more</button>
     </div>
     <p class="meta" id="tameBox" hidden>Glare blobs, or photos left out after the light changed? <button class="linkbtn" id="tameAgain" type="button">Stack again for a wet or shiny subject</button></p>
+    <p class="meta" id="silkBox" hidden>Strands of silk across it? <button class="linkbtn" id="silkAgain" type="button">Stack again in silk mode</button></p>
   </section>
 
   <p class="engine" id="engine">Stacking engine: loading…</p>
@@ -270,11 +272,12 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   startWorker();
 
   // ---------- what's being stacked (remembered; photos shared from Gallery are stacked this way too) ----------
-  const SUBJECT_TAG = { normal: '', tame: 'wet/shiny subject mode', eggs: 'backlit eggs mode' };
+  const SUBJECT_TAG = { normal: '', tame: 'wet/shiny subject mode', eggs: 'backlit eggs mode', silk: 'silk mode' };
   const SUBJECT_NOTE = {
     normal: 'The usual. Remembered, and used for photos you share from Gallery too.',
     tame: 'Works around glare and light that changed between photos, and keeps photos the stacker would otherwise leave out. Remembered, and used for photos shared from Gallery.',
-    eggs: 'For translucent eggs lit from behind: takes out the lamp\'s tint and the milky haze, and brings up eye spots and the embryo\'s outline, the same way every day. Remembered, and used for photos shared from Gallery.'
+    eggs: 'For translucent eggs lit from behind: takes out the lamp\'s tint and the milky haze, and brings up eye spots and the embryo\'s outline, the same way every day. Remembered, and used for photos shared from Gallery.',
+    silk: 'For strands of silk across the view: each strand is taken from a photo where it isn\'t there (it shifts between photos as you lean in). Setae and the spider stay as they are; silk every photo shows, or a blurred veil, stays too. Leave it off for a spider on its web you want to keep. Remembered, and used for photos shared from Gallery.'
   };
   const subject = () => (document.querySelector('input[name=subject]:checked') || {}).value || 'normal';
   function setSubject(v, remember) {
@@ -458,7 +461,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
       try { localStorage.setItem('spood-running', document.hidden ? 'away' : '1'); } catch (e) { /* private mode */ }
       if (cutShort) log(`fewer cores: ${cutShort > 1 ? 'two earlier stacks were' : 'an earlier stack was'} cut off on screen`);
       lastSubject = subject(); lastTame = lastSubject === 'tame';
-      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: Math.min(coresCap, retryCores) === Infinity ? undefined : Math.min(coresCap, retryCores), tame: lastTame, eggs: lastSubject === 'eggs', peek: !!maths && mathsOn } });
+      worker.postMessage({ files, taken, opts: { maxSide, lowMemory: lowMem, noHelpers: oneCore || coresCap === 0, maxHelpers: Math.min(coresCap, retryCores) === Infinity ? undefined : Math.min(coresCap, retryCores), tame: lastTame, eggs: lastSubject === 'eggs', silk: lastSubject === 'silk', peek: !!maths && mathsOn } });
     } catch (e) { fail(e.message || String(e)); }
   }
 
@@ -623,6 +626,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
     S.work.hidden = true; S.done.hidden = false;
     requestAnimationFrame(drawLoupe);
     $('tameBox').hidden = !!lastTame;                      // offered only after a stack made without it
+    $('silkBox').hidden = lastSubject === 'silk';
     if (SUBJECT_TAG[lastSubject]) $('resultInfo').textContent += ' · ' + SUBJECT_TAG[lastSubject];
     if (!reveal) save();
     $('mathsAfter').hidden = !(maths && maths.canReplay); $('shareVideo').hidden = true; vnote('');
@@ -751,6 +755,8 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   });
   // the same photos once more, as a wet or shiny subject
   $('tameAgain').addEventListener('click', () => { if (busy || files.length < 2) return; setSubject('tame', false); $('selection').hidden = true; delete $('selection').dataset.used; run(); });
+  // the same photos once more, with silk taken out
+  $('silkAgain').addEventListener('click', () => { if (busy || files.length < 2) return; setSubject('silk', false); $('selection').hidden = true; delete $('selection').dataset.used; run(); });
   $('again').addEventListener('click', () => {
     files = []; basePixels = null; renderChosen(); S.done.hidden = true; S.pick.hidden = false;
     setSubject(savedSubject(), false);                    // a new burst starts in the remembered mode

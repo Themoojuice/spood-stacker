@@ -458,6 +458,12 @@
     for (const i of left) { for (const a of [warped, wg, wmask, usable]) if (a[i]) STORE.drop(a[i].h); warped[i] = wg[i] = wmask[i] = usable[i] = null; }
     const keptImgs = idx.map(i => warped[i]), keptGray = idx.map(i => wg[i]), weights = idx.map(i => usable[i]), keptMask = idx.map(i => wmask[i]);
     progress(at('merge', 0), 'Merging');
+    // silk and cobwebs: taken from photos without them where there are some (see silkEvidence)
+    // A repeating pattern (an insect screen) is a whole background of thin straight lines: it would
+    // be taken for silk (synthetic mesh scene: -5.6 dB, the spider softened too), so not there.
+    const silkOpt = opts.silk && !repeating ? { side: Math.max(W, H) } : null;
+    if (silkOpt) say('silk mode: strands taken from photos that don\'t have them there');
+    else if (opts.silk) say('silk mode left off: a repeating pattern (a mesh?) is in view, and its lines would be taken for silk');
     await tick();
 
     // ---------- 6. hybrid fusion ----------
@@ -466,7 +472,7 @@
     let out;
     if (opts.stripRows && H > opts.stripRows) {
       // merged and finished a band at a time; then cropped to the box, as RGBA
-      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(at('merge', p), 'Merging'), tick, opts.stripRows, each, SHARPEN, peek);
+      const rgb = await fuseStrips(cv, keptImgs, weights, keptMask, p => progress(at('merge', p), 'Merging'), tick, opts.stripRows, each, SHARPEN, peek, silkOpt);
       unparkAll(weights);
       const data = new Uint8ClampedArray(box.w * box.h * 4);
       for (let y = 0; y < box.h; y++) {
@@ -477,7 +483,7 @@
       if (egg) eggFinish(out.data, out.width, out.height, 4, egg);
     } else {
     const wMats = weights.map(p => unpark(cv, p)); unparkAll(weights);
-    const fused = await fuseHybrid(cv, keptImgs, wMats, keptMask, p => progress(at('merge', p * 0.95), 'Merging'), tick, debug);
+    const fused = await fuseHybrid(cv, keptImgs, wMats, keptMask, p => progress(at('merge', p * 0.95), 'Merging'), tick, debug, undefined, silkOpt);
     wMats.forEach(m => m.delete());
 
     // ---------- 7. finish ----------
@@ -1867,12 +1873,117 @@
     return e;
   }
 
+  /* ---------- silk and cobwebs (opts.silk) ----------
+     A strand of silk hangs at a different depth from what is behind it, so it is sharp in a
+     different photo from its surroundings, and as you lean in it shifts against them (parallax):
+     each photo shows it in a different place. Picking the sharpest photo at every spot then
+     collects strands from several photos at once. Here each photo's silk is found as thin,
+     bright, straight lines whose surroundings are blurred in that same photo (a seta is sharp
+     together with the palp or leg it grows from; a strand over out-of-focus bark is not), and
+     where another photo covering the spot has no silk there, that photo is used instead. Silk
+     that every photo shows (lying on the bark, or a blurred veil in front of everything) stays.
+     Worked out at SILK_SIDE across, where a strand is 1-2 px wide whatever the photo's size. */
+  const SILK_SIDE = 2200;
+  const SILK_LINE = 0.002;          // straight-line evidence (mean thin-ridge strength along a 25 px line) that counts as a line
+  const SILK_FROM = 0.10, SILK_TO = 0.25;   // surroundings at <= 10% of the frame's sharp texture: floating; >= 25%: attached (setae 0.26+ at the 10th percentile, strands 0.04-0.07)
+  const SILK_GAIN = 1.5;
+  let SILK_K = null;
+  /** The 12 straight-line kernels (25 px, every 15°), made once. */
+  function silkKernels(cv) {
+    if (SILK_K) return SILK_K;
+    const L = 25, c = (L - 1) / 2;
+    SILK_K = [];
+    for (let a = 0; a < 180; a += 15) {
+      const t = a * Math.PI / 180, k = cv.Mat.zeros(L, L, cv.CV_32F);
+      cv.line(k, new cv.Point(Math.round(c - c * Math.cos(t)), Math.round(c - c * Math.sin(t))), new cv.Point(Math.round(c + c * Math.cos(t)), Math.round(c + c * Math.sin(t))), new cv.Scalar(1), 1, cv.LINE_AA);
+      let s = 0; for (const v of k.data32F) s += v; k.convertTo(k, cv.CV_32F, 1 / (s || 1));
+      SILK_K.push(k);
+    }
+    return SILK_K;
+  }
+  /** Bright-ridge strength at one scale (Hessian; scale-normalised): a thin bright line scores high. */
+  function ridgeMap(cv, g, sigma) {
+    const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), sigma, sigma);
+    const xx = new cv.Mat(), yy = new cv.Mat(), xy = new cv.Mat();
+    cv.Sobel(b, xx, cv.CV_32F, 2, 0, 3, 0.25); cv.Sobel(b, yy, cv.CV_32F, 0, 2, 3, 0.25); cv.Sobel(b, xy, cv.CV_32F, 1, 1, 3, 0.25); b.delete();
+    const X = xx.data32F, Y = yy.data32F, Z = xy.data32F, out = new Float32Array(X.length), s2 = sigma * sigma;
+    for (let k = 0; k < out.length; k++) {
+      const tr = X[k] + Y[k], d = Math.sqrt((X[k] - Y[k]) * (X[k] - Y[k]) + 4 * Z[k] * Z[k]), l1 = (tr + d) / 2, l2 = (tr - d) / 2;
+      out[k] = (Math.max(0, -l2) - Math.abs(l1)) * s2;
+    }
+    xx.delete(); yy.delete(); xy.delete();
+    return out;
+  }
+  /** One photo's silk scale (a grey at <= SILK_SIDE across). */
+  function silkScale(cv, gray, side) {
+    const s = Math.min(1, SILK_SIDE / side);
+    if (s >= 1) return { g: gray, s: 1, own: false };
+    const o = new cv.Mat(); cv.resize(gray, o, new cv.Size(Math.max(8, Math.round(gray.cols * s)), Math.max(8, Math.round(gray.rows * s))), 0, 0, cv.INTER_AREA);
+    return { g: o, s, own: true };
+  }
+  /** How sharp the texture around each spot is in this photo, with thin bright lines taken out
+      first (a grey opening), so a strand doesn't count as its own surroundings. */
+  function silkSurround(cv, g) {
+    const se = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7)), o = new cv.Mat();
+    cv.morphologyEx(g, o, cv.MORPH_OPEN, se); se.delete();
+    const f = focusMeasure(cv, o, 12); o.delete();
+    return f;
+  }
+  /** One photo's silk evidence at silk scale: straight thin bright lines, and its surroundings' sharpness. */
+  function silkEvidence(cv, gray, side) {
+    const sc = silkScale(cv, gray, side), g = sc.g, N = g.rows * g.cols;
+    const rf = ridgeMap(cv, g, 0.9), rc = ridgeMap(cv, g, 2.5);
+    const thin = new cv.Mat(g.rows, g.cols, cv.CV_32F), T = thin.data32F;
+    for (let k = 0; k < N; k++) T[k] = rf[k] > 1.4 * Math.max(rc[k], 0) && rf[k] > 0 ? rf[k] : 0;
+    const line = new cv.Mat(g.rows, g.cols, cv.CV_32F, new cv.Scalar(0)), tmp = new cv.Mat();
+    for (const k of silkKernels(cv)) { cv.filter2D(thin, tmp, cv.CV_32F, k); cv.max(line, tmp, line); }
+    tmp.delete(); thin.delete();
+    const surr = silkSurround(cv, g);
+    if (sc.own) g.delete();
+    return { line, surr };
+  }
+  /** One photo's silk map at hw x hh (0..1): its lines, where its surroundings are blurred
+      (below SILK_FROM..SILK_TO of the frame's sharp texture level T). Frees the evidence. */
+  function silkMap(cv, ev, T, hw, hh) {
+    const lm = new cv.Mat(); cv.threshold(ev.line, lm, SILK_LINE, 1, cv.THRESH_BINARY); ev.line.delete();
+    const se = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)); cv.dilate(lm, lm, se); se.delete();
+    cv.GaussianBlur(lm, lm, new cv.Size(0, 0), 1, 1);
+    const L = lm.data32F, S = ev.surr.data32F;
+    for (let k = 0; k < L.length; k++) {
+      if (!L[k]) continue;
+      const t = Math.min(1, Math.max(0, (S[k] / T - SILK_FROM) / (SILK_TO - SILK_FROM)));
+      L[k] = Math.min(1, L[k] * (1 - t * t * (3 - 2 * t)) * SILK_GAIN);
+    }
+    ev.surr.delete();
+    const o = new cv.Mat(); cv.resize(lm, o, new cv.Size(hw, hh), 0, 0, lm.cols > hw ? cv.INTER_AREA : cv.INTER_LINEAR); lm.delete();
+    const out = Float32Array.from(o.data32F); o.delete();
+    return out;
+  }
+  /** The frame's sharp-texture level: the 90th percentile of the sharpest photo's surroundings. */
+  function silkLevel(samples) {
+    const s = Float32Array.from(samples).sort();
+    return s[Math.floor(s.length * 0.9)] || 1e-9;
+  }
+  /** Each photo's weight (half size, 8-bit) lowered where it has silk and another photo covering the
+      spot has less: by the difference, so silk every photo shows is left as it is. */
+  function silkApply(weights, maps, N) {
+    const n = weights.length;
+    for (let k = 0; k < N; k++) {
+      let mn = 2;
+      for (let i = 0; i < n; i++) if (weights[i].data[k] > 5 && maps[i][k] < mn) mn = maps[i][k];
+      if (mn >= 2) continue;
+      for (let i = 0; i < n; i++) { const p = maps[i][k] - mn; if (p > 0.004) { const d = weights[i].data; d[k] = Math.round(d[k] * (1 - p)); } }
+    }
+  }
+
   /** imgs8: lined-up photos (8-bit RGB). weights: per photo, half size, 0..1 —
       where it may contribute (has pixels, agrees with the reference, can be trusted).
       valid: per photo, full size 8-bit — where it has pixels of its own. */
-  async function fuseHybrid(cv, imgs8, weights, valid, progress, tick, debug, stats) {
-    // stats = {lo, hi, noise} for the whole frame, when this call merges one strip of it
+  async function fuseHybrid(cv, imgs8, weights, valid, progress, tick, debug, stats, silk = null) {
+    // stats = {lo, hi, noise, silkT} for the whole frame, when this call merges one strip of it;
+    // silk = {side: the frame's long side} to take silk out (opts.silk)
     const n = imgs8.length, W = imgs8[0].cols, H = imgs8[0].rows;
+    const silkEv = silk ? [] : null, silkMaps = silk ? [] : null;
     // --- weights from relative sharpness, computed at half size (weights are smooth) ---
     const hw = Math.ceil(W / 2), hh = Math.ceil(H / 2), half = new cv.Size(hw, hh);
     const Fh = [], texMax = new Float32Array(W * H), N = hw * hh, meanHalf = new Float32Array(N);
@@ -1887,9 +1998,28 @@
       f2.delete();
       const gs = new cv.Mat(); cv.resize(gray, gs, half, 0, 0, cv.INTER_AREA); const S = gs.data32F;
       for (let k = 0; k < N; k++) meanHalf[k] += S[k] / n;
-      gs.delete(); gray.delete();
+      gs.delete();
+      if (silk) {
+        // this photo's silk: mapped now when the frame's texture level is known (a strip), else
+        // its evidence is kept until every photo has been seen
+        const ev = silkEvidence(cv, gray, silk.side);
+        if (stats && stats.silkT) silkMaps.push(silkMap(cv, ev, stats.silkT, hw, hh)); else silkEv.push(ev);
+      }
+      gray.delete();
       progress((i + 1) / n * 0.22);
       await tick();
+    }
+    if (silk) {
+      if (silkEv.length) {                               // the whole frame: its texture level first
+        const mx = new Float32Array(silkEv[0].surr.rows * silkEv[0].surr.cols);
+        for (const ev of silkEv) { const S = ev.surr.data32F; for (let k = 0; k < mx.length; k++) if (S[k] > mx[k]) mx[k] = S[k]; }
+        const T = silkLevel(mx.filter((_, k) => k % 7 === 0));
+        for (const ev of silkEv) silkMaps.push(silkMap(cv, ev, T, hw, hh));
+        silkEv.length = 0;
+      }
+      silkApply(weights, silkMaps, N);
+      if (debug) debug('silk', { width: hw, height: hh, maps: silkMaps.map(m => Float32Array.from(m)) });
+      silkMaps.length = 0;
     }
     // the sharpest photo at each spot, among those that have pixels there
     const Fmax = new Float32Array(N);
@@ -2037,6 +2167,11 @@
   function stripSpans(H, maxRows) {
     const core = Math.max(2 * STRIP_CF + 64, Math.floor((maxRows - 2 * STRIP_OV) / 64) * 64), out = [];
     for (let y0 = 0; y0 < H; y0 += core) { const y1 = Math.min(H, y0 + core); out.push({ y0, y1, e0: Math.max(0, y0 - STRIP_OV), e1: Math.min(H, y1 + STRIP_OV) }); }
+    // A last strip thinner than its cross-fade has no rows of its own (the merge stopped with "offset
+    // is out of bounds", e.g. 1659 rows in 1024-row strips): it joins the one before, which needs no
+    // context below it then, so that strip is at most 64 rows taller than planned.
+    const last = out[out.length - 1];
+    if (out.length > 1 && last.y1 - last.y0 < 2 * STRIP_CF + 64) { out.pop(); const p = out[out.length - 1]; p.y1 = H; p.e1 = H; }
     return out;
   }
   // rounded to the nearest level (it was + 0.5 before rounding, which made every pixel half a level
@@ -2050,15 +2185,19 @@
       band noise) are measured on the whole frame first. The per-photo measurements and the
       strips are tasks (each() runs them, side by side when it can). Returns the finished 8-bit
       RGB frame. */
-  async function fuseStrips(cv, imgs8, weights, valid, progress, tick, maxRows, each, sharpen = 0.35, peek = null) {
+  async function fuseStrips(cv, imgs8, weights, valid, progress, tick, maxRows, each, sharpen = 0.35, peek = null, silk = null) {
     const n = imgs8.length, W = imgs8[0].cols, H = imgs8[0].rows, CF = STRIP_CF;
     const spans = stripSpans(H, maxRows);
     // --- pre-pass 1: texture thresholds from the sharpest fine detail at every 7th pixel ---
     const texS = new Float32Array(Math.ceil(W * H / 7));
-    await each('texture', imgs8.map((img, i) => ({ img, valid: valid[i], W, H, spans })), (k, t) => {
+    let surrMax = null;                                   // silk: the sharpest photo's surroundings, sampled
+    await each('texture', imgs8.map((img, i) => ({ img, valid: valid[i], W, H, spans, silk: !!silk, side: silk ? silk.side : 0 })), (k, r) => {
+      const t = silk ? r.tex : r;
       for (let q = 0; q < texS.length; q++) if (t[q] > texS[q]) texS[q] = t[q];
+      if (silk) { if (!surrMax) surrMax = r.surr.slice(); else for (let q = 0; q < surrMax.length; q++) if (r.surr[q] > surrMax[q]) surrMax[q] = r.surr[q]; }
       progress(0.08 * k / n);
     }, undefined, false);
+    const silkT = silk ? silkLevel(surrMax) : 0; surrMax = null;
     const sorted = texS.slice().sort();
     const lo = sorted[Math.floor(sorted.length * .35)], hi = sorted[Math.floor(sorted.length * .65)];
     // --- pre-pass 2: each band's noise, from the middle strip (as the whole-frame merge measures it) ---
@@ -2085,7 +2224,7 @@
     };
     let placed = 0, shown = 0;
     const partial = new Array(spans.length).fill(0), show = () => progress(0.16 + 0.84 * spans.reduce((a, sp, k) => a + (sp.e1 - sp.e0) * partial[k], 0) / rowsAll);
-    await each('strip', spans.map((sp, s) => ({ s, sp, last: s === spans.length - 1, W, H, imgs: imgs8, weights, valid, stats: { lo, hi, noise }, sharpen })), (k, r, s) => {
+    await each('strip', spans.map((sp, s) => ({ s, sp, last: s === spans.length - 1, W, H, imgs: imgs8, weights, valid, stats: { lo, hi, noise, silkT }, sharpen, silk })), (k, r, s) => {
       partial[s] = 1; show();
       sres[s] = r;
       while (placed < spans.length && sres[placed]) place(placed++, sres[placed - 1]);
@@ -2633,10 +2772,16 @@
     },
     /** one photo's sharpest fine detail at every 7th pixel (texture thresholds for the merge) */
     texture(cv, a) {
-      const { W, H } = a, texS = new Float32Array(Math.ceil(W * H / 7));
+      const { W, H } = a, texS = new Float32Array(Math.ceil(W * H / 7)), surr = a.silk ? [] : null;
       for (const { y0, y1 } of a.spans) {
         const lo = Math.max(0, y0 - 16), hi = Math.min(H, y1 + 16);
         const im = unpark(cv, a.img, lo, hi), g = toGray(cv, im); im.delete();
+        if (surr) {                                       // silk (opts.silk): this photo's surroundings' sharpness, sampled
+          const sc = silkScale(cv, g, a.side), f = silkSurround(cv, sc.g), F = f.data32F, w = f.cols;
+          const r0 = Math.round((y0 - lo) * sc.s), r1 = Math.min(f.rows, Math.round((y1 - lo) * sc.s));
+          for (let k = r0 * w; k < r1 * w; k += 7) surr.push(F[k]);
+          f.delete(); if (sc.own) sc.g.delete();
+        }
         const f2 = focusMeasure(cv, g, 2), T = f2.data32F; g.delete();
         const V = STORE.get(a.valid.h, y0 * W, (y1 - y0) * W);
         for (let y = y0; y < y1; y++) {
@@ -2646,7 +2791,7 @@
         }
         f2.delete();
       }
-      return texS;
+      return surr ? { tex: texS, surr: Float32Array.from(surr) } : texS;
     },
     /** one photo's noise level in each fine band, from rows e0..e1 */
     noise(cv, a) {
@@ -2669,7 +2814,7 @@
       const { W, H, sp, s, last } = a, { y0, y1, e0, e1 } = sp, CF = STRIP_CF, row = W * 3;
       const views = a.imgs.map(p => pview(p, e0, e1)), vv = a.valid.map(p => pview(p, e0, e1));
       const ws = a.weights.map(p => unpark(cv, p, e0 / 2, Math.ceil(e1 / 2)));
-      const fused = await fuseHybrid(cv, views, ws, vv, report, () => Promise.resolve(), null, a.stats);
+      const fused = await fuseHybrid(cv, views, ws, vv, report, () => Promise.resolve(), null, a.stats, a.silk || null);
       ws.forEach(m => m.delete());
       const b = sharpenF(cv, fused, a.sharpen === undefined ? 0.35 : a.sharpen); fused.delete();
       const S = b.data32F;
