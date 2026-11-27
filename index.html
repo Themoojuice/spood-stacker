@@ -341,7 +341,7 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   // CHOOSE_SECS (as before, nothing to tap), a tap on another starts that one at once (and it
   // becomes the remembered one), a tap anywhere else on the sheet holds the countdown, and
   // "Not now" leaves the photos chosen without stacking.
-  const CHOOSE_SECS = 5;
+  const CHOOSE_SECS = 2;
   let chooseTimer = 0, chooseRaf = 0;
   function chooseMode(n) {
     const def = savedSubject(), sheet = $('chooser');
