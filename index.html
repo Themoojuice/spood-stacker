@@ -119,6 +119,19 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
 .sharp input[type=range] { width: 100%; accent-color: var(--accent); }
 .sharp canvas { width: 100%; height: 200px; border-radius: 12px; background: var(--line); touch-action: none; cursor: grab; display: block; }
 
+/* photos from the share sheet: which mode, before stacking starts by itself */
+.chooser { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-end; justify-content: center; background: rgba(0,0,0,.45); }
+.chooser[hidden] { display: none; }
+.chooser .sheet { width: 100%; max-width: 560px; background: var(--surface); color: var(--ink); border-radius: 18px 18px 0 0; padding: 20px 18px calc(18px + env(safe-area-inset-bottom)); box-shadow: 0 -6px 30px rgba(0,0,0,.25); }
+.chooser h2 { font-family: var(--font-display); font-size: 1.3rem; margin: 0 0 4px; }
+.chooser .ccount { color: var(--muted); margin: 0 0 14px; font-family: var(--font-body); }
+.chooser .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chooser .mode { position: relative; overflow: hidden; font: inherit; font-size: 1.05rem; font-weight: 700; padding: 18px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+.chooser .mode.def { border-color: var(--accent); background: var(--accent-soft); }
+.chooser .mode .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); opacity: .22; pointer-events: none; }
+.chooser .mode span { position: relative; }
+.chooser .when { color: var(--muted); font-size: .9rem; margin: 12px 0 0; min-height: 1.3em; }
+.chooser .row { display: flex; justify-content: flex-end; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -227,6 +240,22 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   <p class="engine" id="clearedNote" role="status" hidden></p>
 </main>
 
+<!-- photos from the share sheet: which mode (the last one used starts by itself after a few seconds) -->
+<div class="chooser" id="chooser" hidden role="dialog" aria-modal="true" aria-labelledby="chooserTitle">
+  <div class="sheet" id="chooserSheet">
+    <h2 id="chooserTitle">What are you stacking?</h2>
+    <p class="ccount" id="chooserCount"></p>
+    <div class="modes">
+      <button class="mode" type="button" data-mode="normal"><i class="fill"></i><span>Spider or bug</span></button>
+      <button class="mode" type="button" data-mode="tame"><i class="fill"></i><span>Wet or shiny</span></button>
+      <button class="mode" type="button" data-mode="eggs"><i class="fill"></i><span>Backlit eggs</span></button>
+      <button class="mode" type="button" data-mode="silk"><i class="fill"></i><span>Silk or cobwebs</span></button>
+    </div>
+    <p class="when" id="chooserWhen" aria-live="polite"></p>
+    <div class="row"><button class="ghost" type="button" id="chooserLater">Not now</button></div>
+  </div>
+</div>
+
 
 <script src="exif.js"></script>
 <script src="sharpen.js"></script>
@@ -271,13 +300,13 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
   }
   startWorker();
 
-  // ---------- what's being stacked (remembered; photos shared from Gallery are stacked this way too) ----------
+  // ---------- what's being stacked (remembered; offered first for photos shared from Gallery) ----------
   const SUBJECT_TAG = { normal: '', tame: 'wet/shiny subject mode', eggs: 'backlit eggs mode', silk: 'silk mode' };
   const SUBJECT_NOTE = {
-    normal: 'The usual. Remembered, and used for photos you share from Gallery too.',
-    tame: 'Works around glare and light that changed between photos, and keeps photos the stacker would otherwise leave out. Remembered, and used for photos shared from Gallery.',
-    eggs: 'For translucent eggs lit from behind: takes out the lamp\'s tint and the milky haze, and brings up eye spots and the embryo\'s outline, the same way every day. Remembered, and used for photos shared from Gallery.',
-    silk: 'For strands of silk across the view: each strand is taken from a photo where it isn\'t there (it shifts between photos as you lean in). Setae and the spider stay as they are; silk every photo shows, or a blurred veil, stays too. Leave it off for a spider on its web you want to keep. Remembered, and used for photos shared from Gallery.'
+    normal: 'The usual. Remembered, and offered first for photos you share from Gallery.',
+    tame: 'Works around glare and light that changed between photos, and keeps photos the stacker would otherwise leave out. Remembered, and offered first for photos shared from Gallery.',
+    eggs: 'For translucent eggs lit from behind: takes out the lamp\'s tint and the milky haze, and brings up eye spots and the embryo\'s outline, the same way every day. Remembered, and offered first for photos shared from Gallery.',
+    silk: 'For strands of silk across the view: each strand is taken from a photo where it isn\'t there (it shifts between photos as you lean in). Setae and the spider stay as they are; silk every photo shows, or a blurred veil, stays too. Leave it off for a spider on its web you want to keep. Remembered, and offered first for photos shared from Gallery.'
   };
   const subject = () => (document.querySelector('input[name=subject]:checked') || {}).value || 'normal';
   function setSubject(v, remember) {
@@ -305,9 +334,47 @@ ul.left { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem
           { type: b.type || 'image/jpeg', lastModified: +r.headers.get('x-modified') || Date.now() }));
         await cache.delete(k);
       }
-      if (got.length) { addFiles(got); autoStart = got.length >= 2; maybeAutoStart(); }
+      if (got.length) { addFiles(got); if (got.length >= 2) chooseMode(got.length); }
     } catch (e) { showPickError('Could not read the shared photos. Try sharing them again.'); }
   }
+  // Which mode, before a share-sheet stack starts: the last mode used starts by itself after
+  // CHOOSE_SECS (as before, nothing to tap), a tap on another starts that one at once (and it
+  // becomes the remembered one), a tap anywhere else on the sheet holds the countdown, and
+  // "Not now" leaves the photos chosen without stacking.
+  const CHOOSE_SECS = 5;
+  let chooseTimer = 0, chooseRaf = 0;
+  function chooseMode(n) {
+    const def = savedSubject(), sheet = $('chooser');
+    $('chooserCount').textContent = `${n} photos from the share sheet`;
+    sheet.querySelectorAll('.mode').forEach(b => { b.classList.toggle('def', b.dataset.mode === def); b.querySelector('.fill').style.width = '0'; });
+    sheet.hidden = false;
+    const btn = sheet.querySelector(`.mode[data-mode="${def}"]`) || sheet.querySelector('.mode[data-mode=normal]');
+    const name = btn.textContent.trim(), t0 = performance.now();
+    const tick = () => {
+      const left = CHOOSE_SECS - (performance.now() - t0) / 1000;
+      if (left <= 0) { pick(def); return; }
+      btn.querySelector('.fill').style.width = (100 * (1 - left / CHOOSE_SECS)).toFixed(1) + '%';
+      $('chooserWhen').textContent = `Stacking as ${name} in ${Math.ceil(left)} s. Tap a mode to start now.`;
+      chooseRaf = requestAnimationFrame(tick);
+    };
+    chooseRaf = requestAnimationFrame(tick);
+    chooseTimer = setTimeout(() => pick(def), CHOOSE_SECS * 1000 + 50);   // in case frames are held back
+    try { btn.focus({ preventScroll: true }); } catch (e) { /* old browsers */ }
+  }
+  function holdChoice(note) {
+    cancelAnimationFrame(chooseRaf); clearTimeout(chooseTimer); chooseRaf = chooseTimer = 0;
+    $('chooser').querySelectorAll('.fill').forEach(f => { f.style.width = '0'; });
+    if (note) $('chooserWhen').textContent = note;
+  }
+  function pick(mode) {
+    if ($('chooser').hidden) return;
+    holdChoice(); $('chooser').hidden = true;
+    setSubject(mode, true);
+    autoStart = true; maybeAutoStart();               // at once, or as soon as the engine is ready
+  }
+  $('chooser').querySelectorAll('.mode').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); pick(b.dataset.mode); }));
+  $('chooserLater').addEventListener('click', e => { e.stopPropagation(); holdChoice(); $('chooser').hidden = true; });
+  $('chooserSheet').addEventListener('click', () => { if (chooseTimer) holdChoice('Waiting. Tap a mode to start.'); });
   function maybeAutoStart() { if (autoStart && ready && !busy && files.length >= 2) { autoStart = false; run(); } }
   loadShared();
 
