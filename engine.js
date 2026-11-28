@@ -25,7 +25,9 @@
          onDebug(name, data) - optional, for the test tools: 'lined' / 'flowed' (the lined-up
          photos before / after local correction, plus trust maps), 'weights' (each used
          photo's share of the stack, half size), 'merged' (photos merged per spot), 'usable'
-         (where each photo may contribute, half size), 'shine' (opts.tame: glare maps).
+         (where each photo may contribute, half size), 'shine' (opts.tame: glare maps), 'lines'
+         (where each photo's moved antennae/legs were left out: its weight multiplier, half size).
+         noLines: skip the moving antennae and legs step (movedLines), for tests.
    ref: 1-based number of the reference photo (the stack has its geometry and EXIF).  */
 (function (root) {
   'use strict';
@@ -59,6 +61,7 @@
       ['read', n * 0.03 * mp], ['order', n * 0.05], ['align', (n - 1) * 1.3 / alignPar],
       ['warp', (n - 1) * 0.07 * mp / par('warp', n)], ['prep', n * 0.012 * mp], ['flow', (n - 1) * (0.55 + 0.13 * mp) / par('flow', n)],
       ['select', n * (0.25 + 0.036 * mp) / par('select', n)],
+      ['lines', n * 0.5 + 0.004 * mp * n],
       ['merge', n * 0.165 * mp * strips / par('strip', stripRows ? Math.ceil(H / Math.max(1, stripRows - STRIP_CTX)) : 1)]];
     const total = cost.reduce((a, c) => a + c[1], 0), span = {};
     let acc = 0;
@@ -465,6 +468,27 @@
     if (silkOpt) say('silk mode: strands taken from photos that don\'t have them there');
     else if (opts.silk) say('silk mode left off: a repeating pattern (a mesh?) is in view, and its lines would be taken for silk');
     await tick();
+    // antennae, legs and tips that moved between photos: each copy is left out of the photos it
+    // doesn't belong in (see movedLines). The merge weights are changed only where a copy was found.
+    // (not with a repeating pattern in view: an insect screen is a whole background of lines, shifted by parallax)
+    if (!opts.noLines && !repeating && idx.length > 1) {
+      progress(at('lines', 0), 'Finding moved antennae');
+      const ml = await movedLines(cv, keptGray, keptMask, idx.indexOf(ref), W, H, hw, hh);
+      if (ml) {
+        ml.gates.forEach((g, k) => {
+          if (!g) return;
+          const m = unpark(cv, weights[k]), D = m.data;
+          for (let q = 0; q < D.length; q++) D[q] = Math.floor(D[q] * g[q]);
+          parkRows(weights[k], 0, m); m.delete();
+        });
+        const moved = idx.filter((i, k) => i !== ref && ml.copies[k] > 0).map(i => i + 1);
+        if (moved.length) say(`moved antennae or legs: copies left out of photo${moved.length > 1 ? 's' : ''} ${moved.join(', ')} (${(ml.share * 100).toFixed(1)}% of the frame)`);
+        if (ml.soft > 0) say(`photo ${ref + 1}'s softer copy of a moved part replaced by a sharper one (${(ml.soft * 100).toFixed(2)}% of the frame)`);
+        if (opts.onDebug) opts.onDebug('lines', { hw, hh, photos: idx.map(i => i + 1), gates: ml.gates.map(g => g ? Float32Array.from(g) : null) });
+      }
+      progress(at('lines', 1), 'Finding moved antennae');
+      await tick();
+    }
 
     // ---------- 6. hybrid fusion ----------
     for (const i of idx) { if (wg[i]) STORE.drop(wg[i].h); wg[i] = null; }
@@ -1974,6 +1998,268 @@
       if (mn >= 2) continue;
       for (let i = 0; i < n; i++) { const p = maps[i][k] - mn; if (p > 0.004) { const d = weights[i].data; d[k] = Math.round(d[k] * (1 - p)); } }
     }
+  }
+
+  /* ---------- moving thin parts: antennae, legs and tips that moved between photos ----------
+     A bug waves its antennae while the burst is taken, so each photo has them somewhere else. Each
+     copy is sharp in its own photo over blurred background, so the merge takes every copy and the
+     stack shows several pale antennae. The movement check (ghostHalf) blurs before it compares,
+     and a thin pale antenna over pale bokeh blurs to almost nothing, so it doesn't see them.
+     Here each photo's thin, long structures are found (Hessian line strength gathered along
+     straight 25 px paths at 12 angles, at a fixed working size so thresholds don't depend on the
+     photo's size) and compared with the reference's, at the same angle and nearby, at any scale up
+     to a blur of ~8 px, with mass-preserving (s^3) scaling so a leg that is merely blurred in the
+     reference still counts as the same leg there. Decisions are made per connected line, so a
+     part goes or stays whole. A line of a photo that the reference doesn't explain is:
+       - left alone if it wouldn't show in the stack anyway (on most of its length another photo
+         has over twice its detail), or if it is texture: one of many lines around it (bark
+         streaks, leaf veins shifted by parallax) in a photo at least a little sharper there;
+       - kept, if its photo is plainly focused around it and the reference isn't, and it stands on
+         its own: the sharper version of a part that moved a little. The reference's own softer
+         copy of that part goes instead (an antenna tip that is sharp in one photo and soft and a
+         little elsewhere in the reference), as do other photos showing that soft copy. A line
+         lying on such a kept line is kept too (two photos agreeing on a sharp tip);
+       - otherwise a moved copy: left out of that photo (its weight there goes to exactly 0: the
+         merge's fine detail takes the strongest edge even at a weight of 0.02).
+     What is left out is filled from photos that show the background there, the reference first,
+     so nothing is painted in. Photos where nothing moved are untouched. Off with a repeating
+     pattern in view (an insect screen: a whole background of lines shifted by parallax).
+     Seed bug burst (7 photos, antennae in two poses, 28 Nov 2026): every pale copy gone, the
+     antenna tip sharp; synthetic scenes (nothing moves) within -0.04..+0.12 dB of before. */
+  const LINE_SIDE = 1100;           // working size (long side): an antenna is a few px wide whatever the photo's size
+  const LINE_T0 = 0.004, LINE_T1 = 0.010;   // unexplained line strength: from nothing to fully a moved copy
+  const LINE_SUPR = 0.5;            // ...and the reference's support at most half the photo's own
+  const LINE_CORE = 0.3, LINE_MINLEN = 30;  // lines are cut at 0.3, and must span 30 px (shorter: texture, noise)
+  const LINE_FR0 = 2, LINE_FR1 = 4; // the photo's surroundings 2..4 x sharper than the reference's: focused there, not moved
+  const LINE_WIN = 41;              // surroundings measured over about this many px
+  const LINE_UPF = 0.5;             // a line mostly in such surroundings is the sharper version, kept
+  const LINE_SHOW = 0.5, LINE_SHOWN = 0.4;   // a copy shows in the stack where its photo has at least half the detail of the
+                                    // sharpest other photo there; one showing on under 40% of its length is left alone (1.0,
+                                    // "the sharpest", let back ghosts where two photos' copies overlap and neither wins outright)
+  const LINE_ISO = 0.5, LINE_TEXR = 1.3;   // a line among other lines (their strength around it >= 0.5 of its own) in surroundings
+                                    // at least 1.3 x sharper than the reference's is texture (bark streaks, veins): left alone
+  const LINE_UPR = 10;              // ...and the reference's softer copy within this many px of it goes
+  const LINE_COVER = 15;            // lines within this many px of a photo's edge don't count (the fill there makes false ones)
+  const LINE_GROW = 5;              // what is left out extends this far past the line (setae, the blur around it)
+  const smooth01 = (x, a, b) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  /** Line strength at scale s (Hessian, |l1| - |l2|, scaled s^3) and each pixel's line direction (0..pi). */
+  function hessLine(cv, g, s) {
+    const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), s, s);
+    const xx = new cv.Mat(), yy = new cv.Mat(), xy = new cv.Mat();
+    cv.Sobel(b, xx, cv.CV_32F, 2, 0, 3, 0.25); cv.Sobel(b, yy, cv.CV_32F, 0, 2, 3, 0.25); cv.Sobel(b, xy, cv.CV_32F, 1, 1, 3, 0.25); b.delete();
+    const X = xx.data32F, Y = yy.data32F, Z = xy.data32F, N = X.length, R = new Float32Array(N), D = new Float32Array(N), s3 = s * s * s;
+    for (let k = 0; k < N; k++) {
+      const tr = (X[k] + Y[k]) / 2, d = Math.sqrt((X[k] - Y[k]) * (X[k] - Y[k]) / 4 + Z[k] * Z[k]), lp = tr + d, lm = tr - d;
+      const big = Math.abs(lp) >= Math.abs(lm);
+      R[k] = s3 * Math.max(0, big ? Math.abs(lp) - Math.abs(lm) : Math.abs(lm) - Math.abs(lp));
+      let nrm = 0.5 * Math.atan2(2 * Z[k], X[k] - Y[k]); if (!big) nrm += Math.PI / 2;
+      let dir = nrm + Math.PI / 2; dir %= Math.PI; if (dir < 0) dir += Math.PI;
+      D[k] = dir;
+    }
+    xx.delete(); yy.delete(); xy.delete();
+    return { R, D };
+  }
+  /** Long-line evidence at scale s: line strength of each direction, gathered along 25 px straight
+      paths at 12 angles (the silk kernels). each(a, Float32Array) receives every angle's map. */
+  function lineAngles(cv, g, s, each) {
+    const { R, D } = hessLine(cv, g, s), N = R.length, step = Math.PI / 12;
+    // each pixel's strength is shared between the two angles either side of its direction
+    const b0 = new Uint8Array(N), w0 = new Float32Array(N), w1 = new Float32Array(N);
+    for (let k = 0; k < N; k++) { const f = D[k] / step, a = Math.floor(f), t = f - a; b0[k] = a % 12; w0[k] = R[k] * (1 - t); w1[k] = R[k] * t; }
+    const m = new cv.Mat(g.rows, g.cols, cv.CV_32F), M = m.data32F, o = new cv.Mat(), K = silkKernels(cv);
+    for (let a = 0; a < 12; a++) {
+      const prev = (a + 11) % 12;
+      for (let k = 0; k < N; k++) { const b = b0[k]; M[k] = b === a ? w0[k] : b === prev ? w1[k] : 0; }
+      cv.filter2D(m, o, cv.CV_32F, K[a]);
+      each(a, o.data32F);
+    }
+    m.delete(); o.delete();
+  }
+  /** The strongest long line at each pixel (scale 4) and its angle. */
+  function lineBest(cv, g) {
+    const N = g.rows * g.cols, e = new Float32Array(N), ang = new Uint8Array(N);
+    lineAngles(cv, g, 4, (a, E) => { for (let k = 0; k < N; k++) if (E[k] > e[k]) { e[k] = E[k]; ang[k] = a; } });
+    return { e, ang };
+  }
+  /** Where a photo has lines, per angle, at any scale up to ~8 px of blur: widened by 3 px and to the
+      neighbouring angles, so a slightly shifted or turned copy of the same part counts as there.
+      (Scale 1 is left out: with s^3 scaling it is almost never the strongest.) */
+  function lineSupport(cv, g) {
+    const N = g.rows * g.cols, S = [...Array(12)].map(() => new Float32Array(N));
+    for (const s of [2, 4]) lineAngles(cv, g, s, (a, E) => { const A = S[a]; for (let k = 0; k < N; k++) if (E[k] > A[k]) A[k] = E[k]; });
+    const se = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7)), d = S.map(A => {
+      const m = cv.matFromArray(g.rows, g.cols, cv.CV_32F, A), o = new cv.Mat(); cv.dilate(m, o, se); m.delete();
+      const r = Float32Array.from(o.data32F); o.delete(); return r;
+    });
+    se.delete();
+    for (let a = 0; a < 12; a++) { const A = S[a], P = d[(a + 11) % 12], Q = d[a], R = d[(a + 1) % 12]; for (let k = 0; k < N; k++) A[k] = Math.max(P[k], Q[k], R[k]); }
+    return S;
+  }
+  /** How much of photo i's lines photo j doesn't explain (0..1): best = lineBest(i), sup = lineSupport(j). */
+  function unexplainedLines(best, sup, covI, covJ) {
+    const { e, ang } = best, N = e.length, out = new Float32Array(N);
+    for (let k = 0; k < N; k++) {
+      const c = covI[k] * covJ[k]; if (!c) continue;
+      const sp = sup[ang[k]][k], E = e[k];
+      out[k] = c * smooth01(E - sp, LINE_T0, LINE_T1) * Math.min(1, Math.max(0, 1 - sp / (LINE_SUPR * E + 1e-9)));
+    }
+    return out;
+  }
+  /** Connected lines of a 0..1 map (cut at LINE_CORE): labels and each one's span (bounding-box diagonal). */
+  function lineParts(cv, g, w, h) {
+    const b = new cv.Mat(h, w, cv.CV_8U), B = b.data;
+    for (let k = 0; k < g.length; k++) B[k] = g[k] > LINE_CORE ? 1 : 0;
+    const lab = new cv.Mat(), st = new cv.Mat(), ce = new cv.Mat();
+    const nl = cv.connectedComponentsWithStats(b, lab, st, ce, 8, cv.CV_32S); b.delete(); ce.delete();
+    const S = st.data32S, c = st.cols, span = new Float32Array(nl);
+    for (let l = 1; l < nl; l++) span[l] = Math.hypot(S[l * c + cv.CC_STAT_WIDTH], S[l * c + cv.CC_STAT_HEIGHT]);
+    st.delete();
+    const L = Int32Array.from(lab.data32S); lab.delete();
+    return { nl, L, span };
+  }
+  /** Each part's mean of a map. */
+  function partMeans(parts, m) {
+    const s = new Float64Array(parts.nl), c = new Float64Array(parts.nl), L = parts.L;
+    for (let k = 0; k < L.length; k++) { s[L[k]] += m[k]; c[L[k]]++; }
+    for (let l = 0; l < parts.nl; l++) s[l] /= Math.max(1, c[l]);
+    return s;
+  }
+  function blurArr(cv, A, w, h, s) {
+    const m = cv.matFromArray(h, w, cv.CV_32F, A); cv.GaussianBlur(m, m, new cv.Size(0, 0), s, s);
+    const r = Float32Array.from(m.data32F); m.delete(); return r;
+  }
+  function dilateMask(cv, U8, w, h, r) {
+    const m = cv.matFromArray(h, w, cv.CV_8U, U8), se = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * r + 1, 2 * r + 1));
+    cv.dilate(m, m, se); se.delete();
+    const o = Uint8Array.from(m.data); m.delete(); return o;
+  }
+  /** grays: parked full-size 8-bit greys of the photos to be merged; masks: their parked coverage
+      masks (0/1); r: which one is the reference; hw x hh: the merge weights' size.
+      Returns null if nothing moved, else { gates: per photo, a Float32Array (hw x hh) of 0..1 to
+      multiply its weight by, or null; copies: per photo, the share of the frame left out;
+      soft: the share of the reference's own soft copies replaced }. */
+  async function movedLines(cv, grays, masks, r, W, H, hw, hh) {
+    const n = grays.length, s = Math.min(1, LINE_SIDE / Math.max(W, H));
+    const lw = Math.max(16, Math.round(W * s)), lh = Math.max(16, Math.round(H * s)), N = lw * lh, size = new cv.Size(lw, lh);
+    // greys at line size, lit like the reference (a torch held by hand lights each photo differently)
+    const G = grays.map(p => { const m = unpark(cv, p), o = new cv.Mat(); cv.resize(m, o, size, 0, 0, cv.INTER_AREA); m.delete(); const f = new cv.Mat(); o.convertTo(f, cv.CV_32F, 1 / 255); o.delete(); return f; });
+    const light = m => { const b = new cv.Mat(); cv.GaussianBlur(m, b, new cv.Size(0, 0), 20, 20); return b; };
+    const Lr = light(G[r]);
+    for (let i = 0; i < n; i++) {
+      if (i === r) continue;
+      const Li = light(G[i]), A = G[i].data32F, a = Lr.data32F, b = Li.data32F;
+      for (let k = 0; k < N; k++) A[k] *= Math.min(1.4, Math.max(0.7, a[k] / (b[k] + 1e-4)));
+      Li.delete();
+    }
+    Lr.delete();
+    // where each photo has pixels of its own, away from its edge
+    const cov = masks.map(p => {
+      const m = unpark(cv, p), f = new cv.Mat(); m.convertTo(f, cv.CV_32F); m.delete();
+      const o = new cv.Mat(); cv.resize(f, o, size, 0, 0, cv.INTER_AREA); f.delete();
+      const k = cv.Mat.ones(2 * LINE_COVER + 1, 2 * LINE_COVER + 1, cv.CV_8U); cv.erode(o, o, k); k.delete();
+      const c = Float32Array.from(o.data32F); o.delete(); return c;
+    });
+    await tick();
+    const supR = lineSupport(cv, G[r]);
+    const best = G.map((g, i) => lineBest(cv, g));
+    await tick();
+    // fine detail for "is this photo focused here?"
+    const detail = g => { const b = new cv.Mat(); cv.GaussianBlur(g, b, new cv.Size(0, 0), 0.8, 0.8); const l = new cv.Mat(); cv.Laplacian(b, l, cv.CV_32F); b.delete(); const L = l.data32F, D = new Float32Array(N); for (let k = 0; k < N; k++) D[k] = L[k] * L[k]; l.delete(); return D; };
+    const detR = detail(G[r]), sg = LINE_WIN / 3;
+    // would a photo's line show in the stack? (the merge takes the sharpest photo's detail): the two
+    // sharpest photos at each spot, from lightly blurred detail maps
+    const top1 = new Float32Array(N), top2 = new Float32Array(N), arg1 = new Int8Array(N).fill(-1), detB = [];
+    for (let i = 0; i < n; i++) {
+      const D = blurArr(cv, i === r ? detR : detail(G[i]), lw, lh, 2), c = cov[i]; detB.push(D);
+      for (let k = 0; k < N; k++) { const v = D[k] * (c[k] > 0.5 ? 1 : 0); if (v > top1[k]) { top2[k] = top1[k]; top1[k] = v; arg1[k] = i; } else if (v > top2[k]) top2[k] = v; }
+    }
+    const eps = (() => { const b = blurArr(cv, detR, lw, lh, sg).filter((_, k) => k % 7 === 0).sort(); return b[b.length >> 1] || 1e-9; })();
+    const ghost = new Array(n).fill(null), up = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+      if (i === r) continue;
+      const cand = unexplainedLines(best[i], supR, cov[i], cov[r]);
+      let any = false; for (let k = 0; k < N; k++) if (cand[k] > LINE_CORE) { any = true; break; }
+      if (!any) continue;
+      // focused here: the photo's surroundings (the candidate lines themselves left out) against the reference's
+      const near = new Uint8Array(N); for (let k = 0; k < N; k++) near[k] = cand[k] > 0.2 ? 1 : 0;
+      const nd = dilateMask(cv, near, lw, lh, 4), keep = new Float32Array(N), di = detail(G[i]), dr = new Float32Array(N);
+      for (let k = 0; k < N; k++) { const q = 1 - nd[k]; keep[k] = q; di[k] *= q; dr[k] = detR[k] * q; }
+      // ...and how many other lines are around it in this photo (texture), the candidates left out
+      const el = new Float32Array(N), e = best[i].e; for (let k = 0; k < N; k++) el[k] = e[k] * keep[k];
+      const K = blurArr(cv, keep, lw, lh, sg), Si = blurArr(cv, di, lw, lh, sg), Sr = blurArr(cv, dr, lw, lh, sg), El = blurArr(cv, el, lw, lh, sg);
+      const ratio = new Float32Array(N), fh = new Float32Array(N), dens = new Float32Array(N);
+      for (let k = 0; k < N; k++) { const d = K[k] + 1e-3; ratio[k] = (Si[k] / d + eps) / (Sr[k] / d + eps); fh[k] = smooth01(ratio[k], LINE_FR0, LINE_FR1); dens[k] = El[k] / d; }
+      const show = new Float32Array(N), Di = detB[i];
+      for (let k = 0; k < N; k++) show[k] = Di[k] >= LINE_SHOW * (arg1[k] === i ? top2[k] : top1[k]) ? 1 : 0;
+      const parts = lineParts(cv, cand, lw, lh), mf = partMeans(parts, fh), mr = partMeans(parts, ratio), md = partMeans(parts, dens), me = partMeans(parts, e), ms = partMeans(parts, show);
+      const isG = new Uint8Array(parts.nl), isU = new Uint8Array(parts.nl);
+      for (let l = 1; l < parts.nl; l++) {
+        if (parts.span[l] < LINE_MINLEN) continue;
+        const texture = md[l] >= LINE_ISO * me[l];
+        if (mf[l] >= LINE_UPF) { if (!texture) isU[l] = 1; }      // the sharper version of a part (texture in focus: left alone)
+        else if (ms[l] >= LINE_SHOWN && !(texture && mr[l] >= LINE_TEXR)) isG[l] = 1;
+      }
+      const g = new Float32Array(N), u = new Uint8Array(N);
+      for (let k = 0; k < N; k++) { const l = parts.L[k]; if (isG[l]) g[k] = cand[k]; if (isU[l]) u[k] = 1; }
+      ghost[i] = g; up[i] = u;
+      await tick();
+    }
+    // a moved copy lying on another photo's kept sharper version is that version too (two photos agreeing on a sharp tip)
+    for (let it = 0; it < 2; it++) {
+      const U = up.map(u => u ? dilateMask(cv, u, lw, lh, 3) : null);
+      for (let i = 0; i < n; i++) {
+        if (!ghost[i]) continue;
+        const others = new Uint8Array(N); let anyU = false;
+        for (let j = 0; j < n; j++) if (j !== i && U[j]) { anyU = true; const D = U[j]; for (let k = 0; k < N; k++) others[k] |= D[k]; }
+        if (!anyU) continue;
+        const parts = lineParts(cv, ghost[i], lw, lh), hit = partMeans(parts, others);
+        for (let k = 0; k < N; k++) { const l = parts.L[k]; if (l && hit[l] > 0.3) { up[i][k] = 1; ghost[i][k] = 0; } }
+      }
+    }
+    // the reference's softer copies of parts another photo shows sharper nearby, and every other photo's view of them
+    const removed = new Float32Array(N);
+    for (let i = 0; i < n; i++) {
+      if (i === r || !up[i] || !up[i].some(v => v)) continue;
+      // only around its kept lines: photo i's line support in a crop (the reference's soft copy is within LINE_UPR of them)
+      let x0 = lw, y0 = lh, x1 = -1, y1 = -1;
+      for (let y = 0, k = 0; y < lh; y++) for (let x = 0; x < lw; x++, k++) if (up[i][k]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      const M = 80; x0 = Math.max(0, x0 - M); y0 = Math.max(0, y0 - M); x1 = Math.min(lw - 1, x1 + M); y1 = Math.min(lh - 1, y1 + M);
+      const cw = x1 - x0 + 1, ch = y1 - y0 + 1, cN = cw * ch, roi = G[i].roi(new cv.Rect(x0, y0, cw, ch)), gi = roi.clone(); roi.delete();
+      const supI = lineSupport(cv, gi); gi.delete();
+      const cut = A => { const o = new A.constructor(cN); for (let y = 0; y < ch; y++) o.set(A.subarray((y0 + y) * lw + x0, (y0 + y) * lw + x0 + cw), y * cw); return o; };
+      const A = unexplainedLines({ e: cut(best[r].e), ang: cut(best[r].ang) }, supI, cut(cov[r]), cut(cov[i])); supI.length = 0;
+      const parts = lineParts(cv, A, cw, ch), Z = dilateMask(cv, cut(up[i]), cw, ch, LINE_UPR), touch = partMeans(parts, Z);
+      for (let y = 0, q = 0; y < ch; y++) for (let x = 0; x < cw; x++, q++) { const l = parts.L[q], k = (y0 + y) * lw + x0 + x; if (l && touch[l] > 0 && A[q] > removed[k]) removed[k] = A[q]; }
+      await tick();
+    }
+    let softShare = 0;
+    if (removed.some(v => v > 0.5)) {
+      ghost[r] = removed;
+      const R0 = new Uint8Array(N); for (let k = 0; k < N; k++) { R0[k] = removed[k] > LINE_CORE ? 1 : 0; if (removed[k] > 0.5) softShare++; }
+      const R = dilateMask(cv, R0, lw, lh, 3);
+      for (let k2 = 0; k2 < n; k2++) {
+        if (k2 === r || (up[k2] && up[k2].some(v => v))) continue;
+        const e = best[k2].e, c = cov[k2], g = ghost[k2] || (ghost[k2] = new Float32Array(N));
+        for (let k = 0; k < N; k++) if (R[k]) { const v = c[k] * smooth01(e[k], LINE_T0, LINE_T1); if (v > g[k]) g[k] = v; }
+      }
+    }
+    G.forEach(m => m.delete()); supR.length = 0;
+    // gates: 0 over a left-out line and LINE_GROW px around it, easing back to 1
+    const gates = new Array(n).fill(null), copies = new Array(n).fill(0), union = new Uint8Array(N);
+    let anyGate = false;
+    for (let i = 0; i < n; i++) {
+      const g = ghost[i]; if (!g) continue;
+      let on = 0; for (let k = 0; k < N; k++) if (g[k] > 0.5) { on++; if (i !== r) union[k] = 1; }
+      if (!on) continue;
+      anyGate = true; copies[i] = on / N;
+      const m = cv.matFromArray(lh, lw, cv.CV_32F, g), se = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2 * LINE_GROW + 1, 2 * LINE_GROW + 1));
+      cv.dilate(m, m, se); se.delete(); cv.GaussianBlur(m, m, new cv.Size(0, 0), 1.5, 1.5);
+      const M = m.data32F; for (let k = 0; k < N; k++) M[k] = 1 - smooth01(M[k], 0.1, 0.4);
+      const o = new cv.Mat(); cv.resize(m, o, new cv.Size(hw, hh), 0, 0, cv.INTER_LINEAR); m.delete();
+      gates[i] = Float32Array.from(o.data32F); o.delete();
+    }
+    let un = 0; for (let k = 0; k < N; k++) un += union[k];
+    return anyGate ? { gates, copies, share: un / N, soft: softShare / N } : null;
   }
 
   /** imgs8: lined-up photos (8-bit RGB). weights: per photo, half size, 0..1 —
